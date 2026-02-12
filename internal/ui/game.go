@@ -189,20 +189,21 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	// ── Route with country flag ──
 	var routeText string
 	var flagAirport *provider.AirportRef
-	if state.Direction == provider.Arriving {
+	if state.Direction == provider.Arriving && flight.Origin != nil && flight.Origin.DisplayCity() != "Unknown" {
 		routeText = fmt.Sprintf("From %s", flight.Origin.DisplayCity())
 		flagAirport = flight.Origin
-	} else {
+	} else if state.Direction == provider.Departing && flight.Destination != nil && flight.Destination.DisplayCity() != "Unknown" {
 		routeText = fmt.Sprintf("To %s", flight.Destination.DisplayCity())
 		flagAirport = flight.Destination
 	}
-	drawText(screen, routeText, 16, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
-
-	// Draw country flag next to route text
-	if flagAirport != nil {
-		g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
+	if routeText != "" {
+		drawText(screen, routeText, 16, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
+		// Draw country flag next to route text
+		if flagAirport != nil {
+			g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
+		}
+		y += 24
 	}
-	y += 32
 
 	// ── Separator ──
 	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
@@ -376,15 +377,11 @@ func (g *Game) fetchAirlineLogo(code string, flight *provider.Flight) {
 		iataCode = strings.ToLower(code)
 	}
 
-	// Build URL list: prefer card_image from airlines.json, then external services
-	var urls []string
-	if a, ok := LookupAirlineByIATA(iataCode); ok && a.CardImage != "" {
-		urls = append(urls, a.CardImage)
-	}
-	urls = append(urls,
+	// Fetch clean airline logos from external services
+	urls := []string{
 		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_350_350_s.png", iataCode),
 		fmt.Sprintf("https://pics.avs.io/350/350/%s.png", strings.ToUpper(iataCode)),
-	)
+	}
 
 	for _, u := range urls {
 		img := tryFetchImage(u)

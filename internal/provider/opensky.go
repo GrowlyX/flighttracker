@@ -285,6 +285,16 @@ func stateToFlight(s openskyStateVec) Flight {
 		if callsign, ok := s[1].(string); ok {
 			f.Ident = trimCallsign(callsign)
 			f.IdentICAO = f.Ident
+
+			// Extract airline ICAO prefix and flight number from callsign
+			// e.g. "UAL2090" → prefix="UAL", flightNum="2090"
+			if prefix, flightNum := parseCallsign(f.Ident); prefix != "" {
+				f.OperatorICAO = prefix
+				if iata, ok := icaoToIATACode[prefix]; ok {
+					f.OperatorIATA = iata
+					f.IdentIATA = iata + flightNum
+				}
+			}
 		}
 	}
 	if len(s) > 8 && s[8] != nil {
@@ -293,6 +303,55 @@ func stateToFlight(s openskyStateVec) Flight {
 		}
 	}
 	return f
+}
+
+// parseCallsign splits an ICAO callsign into airline prefix and flight number.
+// E.g. "UAL2090" → ("UAL", "2090"), "SWA456" → ("SWA", "456").
+func parseCallsign(cs string) (prefix, flightNum string) {
+	if cs == "" {
+		return "", ""
+	}
+	// Find where letters end and digits begin
+	i := 0
+	for i < len(cs) && cs[i] >= 'A' && cs[i] <= 'Z' {
+		i++
+	}
+	if i == 0 || i == len(cs) {
+		return "", "" // no prefix or no flight number
+	}
+	return cs[:i], cs[i:]
+}
+
+// icaoToIATACode maps common ICAO airline designators to IATA codes.
+var icaoToIATACode = map[string]string{
+	// US Majors
+	"UAL": "UA", "AAL": "AA", "DAL": "DL", "SWA": "WN", "ASA": "AS",
+	"JBU": "B6", "NKS": "NK", "FFT": "F9", "HAL": "HA", "MXY": "MX",
+	// US Regionals
+	"SKW": "OO", "RPA": "YX", "ENY": "MQ", "PDT": "PT", "PSA": "OH",
+	"JIA": "OH", "CPZ": "QX", "GJS": "G7", "ACA": "AC",
+	// European
+	"AFR": "AF", "BAW": "BA", "DLH": "LH", "KLM": "KL", "SAS": "SK",
+	"FIN": "AY", "IBE": "IB", "AZA": "AZ", "TAP": "TP", "VIR": "VS",
+	"EIN": "EI", "EZY": "U2", "RYR": "FR", "SWR": "LX", "AUA": "OS",
+	"BEL": "SN", "LOT": "LO", "CSA": "OK", "EWG": "EW", "WZZ": "W6",
+	"VLG": "VY", "NOZ": "DY",
+	// Middle East
+	"UAE": "EK", "ETD": "EY", "QTR": "QR", "THY": "TK", "SAA": "SA",
+	"GFA": "GF", "MEA": "ME", "SVA": "SV", "ELY": "LY", "FDB": "FZ",
+	// Asian
+	"ANA": "NH", "JAL": "JL", "CPA": "CX", "SIA": "SQ", "EVA": "BR",
+	"CAL": "CI", "CCA": "CA", "CSN": "CZ", "CES": "MU", "HDA": "HU",
+	"KAL": "KE", "AAR": "OZ", "THA": "TH", "MAS": "MH", "VNA": "VN",
+	"GIA": "GA", "AXM": "AK", "PAL": "PR", "CEB": "5J",
+	"AIC": "AI", "IGO": "6E", "SEJ": "RS",
+	// Oceania
+	"QFA": "QF", "ANZ": "NZ", "JST": "JQ",
+	// Americas
+	"WJA": "WS", "AMX": "AM", "GLO": "G3", "AVA": "AV", "CMP": "CM",
+	"LAN": "LA", "VOI": "Y4", "TAM": "JJ", "AZU": "AD",
+	// Africa
+	"ETH": "ET", "SAW": "SA", "MSR": "MS",
 }
 
 func stateToPosition(s openskyStateVec) FlightPosition {
