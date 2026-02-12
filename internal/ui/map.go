@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
@@ -46,6 +47,9 @@ type MapRenderer struct {
 	tileCache sync.Map // map[TileKey]*ebiten.Image
 	tileFetch sync.Map // map[TileKey]bool (in-flight fetches)
 	fetchSem  chan struct{}
+
+	// Plane icon
+	planeImg *ebiten.Image
 }
 
 // NewMapRenderer creates a map renderer for the given screen region.
@@ -342,62 +346,47 @@ func (m *MapRenderer) drawAirportMarker(screen *ebiten.Image, lat, lon float64) 
 	vector.DrawFilledCircle(screen, x, y, 3, color.RGBA{0x00, 0xdd, 0xff, 0xff}, true)
 }
 
-// drawPlane draws the aircraft icon at the given position.
+// drawPlane draws the aircraft icon at the given position using the airplane PNG.
 func (m *MapRenderer) drawPlane(screen *ebiten.Image, lat, lon float64, heading *int) {
+	if m.planeImg == nil {
+		return
+	}
+
 	x, y := m.latLonToScreen(lat, lon)
 
 	angle := 0.0
 	if heading != nil {
-		angle = float64(*heading) * math.Pi / 180
+		// The airplane PNG points up-right (~45°). Subtract 45° so heading=0 means north.
+		angle = (float64(*heading) - 45) * math.Pi / 180
 	}
 
-	size := float32(14)
+	bounds := m.planeImg.Bounds()
+	imgW := float64(bounds.Dx())
+	imgH := float64(bounds.Dy())
 
-	// Nose
-	nx := x + float32(math.Sin(angle))*size
-	ny := y - float32(math.Cos(angle))*size
+	// Scale to ~36px on screen
+	targetSize := 36.0
+	scale := targetSize / math.Max(imgW, imgH)
 
-	// Left wing
-	leftAngle := angle - 2.5
-	lx := x + float32(math.Sin(leftAngle))*size*0.6
-	ly := y - float32(math.Cos(leftAngle))*size*0.6
+	op := &ebiten.DrawImageOptions{}
 
-	// Right wing
-	rightAngle := angle + 2.5
-	rx := x + float32(math.Sin(rightAngle))*size*0.6
-	ry := y - float32(math.Cos(rightAngle))*size*0.6
+	// Move origin to center of image for rotation
+	op.GeoM.Translate(-imgW/2, -imgH/2)
+	op.GeoM.Scale(scale, scale)
+	op.GeoM.Rotate(angle)
+	op.GeoM.Translate(float64(x), float64(y))
 
-	planeColor := color.RGBA{0xff, 0xcc, 0x00, 0xff}
-
-	var path vector.Path
-	path.MoveTo(nx, ny)
-	path.LineTo(lx, ly)
-	path.LineTo(rx, ry)
-	path.Close()
-
-	vs, is := path.AppendVerticesAndIndicesForFilling(nil, nil)
-	for i := range vs {
-		vs[i].SrcX = 1
-		vs[i].SrcY = 1
-		vs[i].ColorR = float32(planeColor.R) / 255
-		vs[i].ColorG = float32(planeColor.G) / 255
-		vs[i].ColorB = float32(planeColor.B) / 255
-		vs[i].ColorA = float32(planeColor.A) / 255
-	}
-
-	op := &ebiten.DrawTrianglesOptions{}
-	op.AntiAlias = true
-	screen.DrawTriangles(vs, is, emptySubImage(), op)
-
-	// Glow
-	vector.DrawFilledCircle(screen, x, y, 4, color.RGBA{0xff, 0xcc, 0x00, 0x50}, true)
+	screen.DrawImage(m.planeImg, op)
 }
 
-// emptySubImage returns a tiny white image for DrawTriangles.
-func emptySubImage() *ebiten.Image {
-	img := ebiten.NewImage(3, 3)
-	img.Fill(color.White)
-	return img.SubImage(img.Bounds()).(*ebiten.Image)
+// LoadPlaneIcon loads the airplane icon image from raw PNG bytes.
+func (m *MapRenderer) LoadPlaneIcon(pngData []byte) error {
+	img, _, err := image.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		return fmt.Errorf("decode plane icon: %w", err)
+	}
+	m.planeImg = ebiten.NewImageFromImage(img)
+	return nil
 }
 
 // GetSFOScreenPos returns the screen position of SFO (for label rendering).

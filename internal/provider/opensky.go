@@ -3,8 +3,8 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -76,7 +76,7 @@ func (o *OpenSkyProvider) GetFlightsNear(airportICAO string, direction FlightDir
 
 	var flights []Flight
 	for _, s := range raw.States {
-		f := s.toFlight()
+		f := stateToFlight(s)
 		if f.IsAirborne && f.Ident != "" {
 			flights = append(flights, f)
 		}
@@ -117,7 +117,7 @@ func (o *OpenSkyProvider) GetFlightPosition(flightID string) (*FlightPosition, e
 		return nil, fmt.Errorf("opensky: aircraft not found")
 	}
 
-	pos := raw.States[0].toPosition()
+	pos := stateToPosition(raw.States[0])
 	return &pos, nil
 }
 
@@ -129,19 +129,24 @@ type openskyResponse struct {
 }
 
 // openskyStateVec is an OpenSky state vector (returned as a JSON array, not object).
-type openskyStateVec [17]any
+// Can be 17 or 18 elements depending on whether `extended` was requested.
+type openskyStateVec = []any
 
-func (s openskyStateVec) toFlight() Flight {
+func stateToFlight(s openskyStateVec) Flight {
 	f := Flight{IsAirborne: true}
 
-	if icao24, ok := s[0].(string); ok {
-		f.FlightID = icao24 // ICAO24 transponder hex
+	if len(s) > 0 {
+		if icao24, ok := s[0].(string); ok {
+			f.FlightID = icao24 // ICAO24 transponder hex
+		}
 	}
-	if callsign, ok := s[1].(string); ok {
-		f.Ident = trimCallsign(callsign)
-		f.IdentICAO = f.Ident
+	if len(s) > 1 {
+		if callsign, ok := s[1].(string); ok {
+			f.Ident = trimCallsign(callsign)
+			f.IdentICAO = f.Ident
+		}
 	}
-	if s[8] != nil {
+	if len(s) > 8 && s[8] != nil {
 		if onGround, ok := s[8].(bool); ok && onGround {
 			f.IsAirborne = false
 		}
@@ -149,34 +154,46 @@ func (s openskyStateVec) toFlight() Flight {
 	return f
 }
 
-func (s openskyStateVec) toPosition() FlightPosition {
+func stateToPosition(s openskyStateVec) FlightPosition {
 	pos := FlightPosition{
 		Timestamp: time.Now(),
 	}
 
-	if lat, ok := toFloat(s[6]); ok {
-		pos.Latitude = lat
+	if len(s) > 6 {
+		if lat, ok := toFloat(s[6]); ok {
+			pos.Latitude = lat
+		}
 	}
-	if lon, ok := toFloat(s[5]); ok {
-		pos.Longitude = lon
+	if len(s) > 5 {
+		if lon, ok := toFloat(s[5]); ok {
+			pos.Longitude = lon
+		}
 	}
-	if alt, ok := toFloat(s[7]); ok { // baro_altitude in meters
-		pos.Altitude = int(alt * 3.28084 / 100) // convert to flight levels (100ft)
+	if len(s) > 7 {
+		if alt, ok := toFloat(s[7]); ok { // baro_altitude in meters
+			pos.Altitude = int(alt * 3.28084 / 100) // convert to flight levels (100ft)
+		}
 	}
-	if spd, ok := toFloat(s[9]); ok { // velocity in m/s
-		pos.Groundspeed = int(spd * 1.94384) // convert to knots
+	if len(s) > 9 {
+		if spd, ok := toFloat(s[9]); ok { // velocity in m/s
+			pos.Groundspeed = int(spd * 1.94384) // convert to knots
+		}
 	}
-	if hdg, ok := toFloat(s[10]); ok { // true_track in degrees
-		h := int(hdg)
-		pos.Heading = &h
+	if len(s) > 10 {
+		if hdg, ok := toFloat(s[10]); ok { // true_track in degrees
+			h := int(hdg)
+			pos.Heading = &h
+		}
 	}
-	if vrate, ok := toFloat(s[11]); ok { // vertical_rate in m/s
-		if vrate > 1 {
-			pos.AltitudeChange = "C"
-		} else if vrate < -1 {
-			pos.AltitudeChange = "D"
-		} else {
-			pos.AltitudeChange = "-"
+	if len(s) > 11 {
+		if vrate, ok := toFloat(s[11]); ok { // vertical_rate in m/s
+			if vrate > 1 {
+				pos.AltitudeChange = "C"
+			} else if vrate < -1 {
+				pos.AltitudeChange = "D"
+			} else {
+				pos.AltitudeChange = "-"
+			}
 		}
 	}
 
@@ -198,13 +215,7 @@ func toFloat(v any) (float64, bool) {
 
 func trimCallsign(cs string) string {
 	// OpenSky pads callsigns with spaces.
-	result := ""
-	for _, c := range cs {
-		if c != ' ' {
-			result += string(c)
-		}
-	}
-	return result
+	return strings.TrimSpace(cs)
 }
 
 // airportCoords returns the lat/lon for known airports.
@@ -224,6 +235,3 @@ func airportCoords(icao string) (float64, float64) {
 	// Default to SFO
 	return sfoLatOS, sfoLonOS
 }
-
-// unused but needed for reference
-var _ = math.Abs

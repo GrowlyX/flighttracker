@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/subham/flighttracker/internal/provider"
@@ -40,8 +41,13 @@ func main() {
 
 	log.Printf("Provider chain: %d providers configured", len(providers))
 
-	// Create multi-provider with waterfall failover
+	// Create multi-provider with smart rate-limit-aware selection
 	prov := provider.NewMultiProvider(providers...)
+
+	// Configure rate limits
+	prov.SetRateLimit("aeroapi", 10, time.Minute)       // 10 requests per minute
+	prov.SetRateLimit("opensky", 4000, 24*time.Hour)    // 4000 requests per day
+	prov.SetRateLimit("aviationstack", 3, 24*time.Hour) // ~100/month ≈ conservatively 3/day
 
 	// Create tracker
 	t := tracker.New(prov)
