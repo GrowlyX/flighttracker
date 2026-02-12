@@ -129,6 +129,12 @@ func (m *MultiProvider) GetFlightsNear(airportICAO string, direction FlightDirec
 		}
 		log.Printf("[provider] %s returned %d flights", p.Name(), len(flights))
 		m.activeIdx = i
+
+		// Tag every flight with its source provider for sticky polling
+		for j := range flights {
+			flights[j].SourceProvider = p.Name()
+		}
+
 		return flights, nil
 	}
 
@@ -139,37 +145,55 @@ func (m *MultiProvider) GetFlightsNear(airportICAO string, direction FlightDirec
 	return nil, nil
 }
 
-// GetFlightPosition tries the active provider first (if it has capacity),
-// then falls back to others sorted by capacity.
+// providerIdxByName returns the index of a provider by its name, or -1 if not found.
+func (m *MultiProvider) providerIdxByName(name string) int {
+	for i, e := range m.entries {
+		if e.provider.Name() == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// GetFlightPosition uses the flight's source provider for position polling.
+// Only falls back to other providers if the source provider is rate-limited.
 func (m *MultiProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
-	// Try the active provider first if it has capacity.
-	if m.activeIdx < len(m.entries) && m.canUse(m.activeIdx) {
-		m.recordUse(m.activeIdx)
-		pos, err := m.entries[m.activeIdx].provider.GetFlightPosition(flight)
+	// Determine which provider to use — prefer the source (discovery) provider
+	srcIdx := m.providerIdxByName(flight.SourceProvider)
+	if srcIdx < 0 {
+		srcIdx = m.activeIdx // fallback to active if source unknown
+	}
+
+	// Try the source provider if it has capacity
+	if srcIdx < len(m.entries) && m.canUse(srcIdx) {
+		m.recordUse(srcIdx)
+		pos, err := m.entries[srcIdx].provider.GetFlightPosition(flight)
 		if err == nil && pos != nil {
 			return pos, nil
 		}
 		if err != nil {
 			log.Printf("[provider] %s failed for GetFlightPosition: %v",
-				m.entries[m.activeIdx].provider.Name(), err)
+				m.entries[srcIdx].provider.Name(), err)
 		}
-	} else if m.activeIdx < len(m.entries) && !m.canUse(m.activeIdx) {
-		log.Printf("[provider] %s rate-limited for position, falling back",
-			m.entries[m.activeIdx].provider.Name())
+	} else if srcIdx < len(m.entries) {
+		log.Printf("[provider] %s (source) rate-limited, falling back to others",
+			m.entries[srcIdx].provider.Name())
 	}
 
-	// Fall back to others sorted by capacity.
+	// Source failed or rate-limited — fall back to others sorted by capacity
 	order := m.sortedByCapacity()
 	var lastErr error
 	for _, i := range order {
-		if i == m.activeIdx {
-			continue
+		if i == srcIdx {
+			continue // already tried
 		}
 		p := m.entries[i].provider
 		if !m.canUse(i) {
 			continue
 		}
 
+		log.Printf("[provider] falling back to %s for position (source was %s)",
+			p.Name(), flight.SourceProvider)
 		m.recordUse(i)
 		pos, err := p.GetFlightPosition(flight)
 		if err != nil {
@@ -177,7 +201,6 @@ func (m *MultiProvider) GetFlightPosition(flight *Flight) (*FlightPosition, erro
 			continue
 		}
 		if pos != nil {
-			m.activeIdx = i
 			return pos, nil
 		}
 	}
