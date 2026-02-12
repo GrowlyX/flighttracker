@@ -269,13 +269,65 @@ func (m *MapRenderer) fetchTile(key TileKey) {
 	m.tileCache.Store(key, ebiImg)
 }
 
-// drawRouteLine draws a line from SFO to the plane.
+// drawRouteLine draws a great circle arc from SFO to the plane.
 func (m *MapRenderer) drawRouteLine(screen *ebiten.Image, lat, lon float64) {
-	sfoX, sfoY := m.latLonToScreen(sfoLat, sfoLon)
-	planeX, planeY := m.latLonToScreen(lat, lon)
+	// Generate points along the great circle path using SLERP.
+	const numSegments = 64
+	points := greatCirclePoints(sfoLat, sfoLon, lat, lon, numSegments)
 
 	routeColor := color.RGBA{0x00, 0xbb, 0xff, 0x90}
-	vector.StrokeLine(screen, sfoX, sfoY, planeX, planeY, 2.5, routeColor, true)
+
+	for i := 0; i < len(points)-1; i++ {
+		x1, y1 := m.latLonToScreen(points[i][0], points[i][1])
+		x2, y2 := m.latLonToScreen(points[i+1][0], points[i+1][1])
+
+		// Skip segments that wrap around the screen (antimeridian crossing artifact)
+		if math.Abs(float64(x2-x1)) > float64(m.w)/2 {
+			continue
+		}
+
+		vector.StrokeLine(screen, x1, y1, x2, y2, 2.5, routeColor, true)
+	}
+}
+
+// greatCirclePoints computes intermediate lat/lon points along a great circle arc
+// using spherical linear interpolation (SLERP).
+func greatCirclePoints(lat1, lon1, lat2, lon2 float64, n int) [][2]float64 {
+	φ1 := lat1 * math.Pi / 180
+	λ1 := lon1 * math.Pi / 180
+	φ2 := lat2 * math.Pi / 180
+	λ2 := lon2 * math.Pi / 180
+
+	// Central angle using the Vincenty formula (more stable for small/large angles)
+	dλ := λ2 - λ1
+	Δσ := math.Atan2(
+		math.Sqrt(math.Pow(math.Cos(φ2)*math.Sin(dλ), 2)+
+			math.Pow(math.Cos(φ1)*math.Sin(φ2)-math.Sin(φ1)*math.Cos(φ2)*math.Cos(dλ), 2)),
+		math.Sin(φ1)*math.Sin(φ2)+math.Cos(φ1)*math.Cos(φ2)*math.Cos(dλ),
+	)
+
+	if Δσ < 1e-10 {
+		// Points are essentially the same location
+		return [][2]float64{{lat1, lon1}, {lat2, lon2}}
+	}
+
+	points := make([][2]float64, n+1)
+	for i := 0; i <= n; i++ {
+		f := float64(i) / float64(n)
+
+		a := math.Sin((1-f)*Δσ) / math.Sin(Δσ)
+		b := math.Sin(f*Δσ) / math.Sin(Δσ)
+
+		x := a*math.Cos(φ1)*math.Cos(λ1) + b*math.Cos(φ2)*math.Cos(λ2)
+		y := a*math.Cos(φ1)*math.Sin(λ1) + b*math.Cos(φ2)*math.Sin(λ2)
+		z := a*math.Sin(φ1) + b*math.Sin(φ2)
+
+		φ := math.Atan2(z, math.Sqrt(x*x+y*y))
+		λ := math.Atan2(y, x)
+
+		points[i] = [2]float64{φ * 180 / math.Pi, λ * 180 / math.Pi}
+	}
+	return points
 }
 
 // drawAirportMarker draws SFO dot.
