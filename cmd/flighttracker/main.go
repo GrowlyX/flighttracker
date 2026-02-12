@@ -61,7 +61,7 @@ func main() {
 	game := ui.NewGame(t)
 
 	ebiten.SetWindowTitle("SFO Flight Tracker")
-	ebiten.SetWindowSize(800, 480)
+	ebiten.SetWindowSize(1920, 1080)
 	ebiten.SetTPS(30)
 	ebiten.SetVsyncEnabled(true)
 

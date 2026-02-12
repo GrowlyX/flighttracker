@@ -23,13 +23,13 @@ import (
 )
 
 const (
-	screenWidth  = 800
-	screenHeight = 480
+	screenWidth  = 1920
+	screenHeight = 1080
 
 	// Layout: 35% left panel, 65% right map
-	leftPanelWidth = 280 // 35% of 800
-	mapX           = 280
-	mapWidth       = 520 // 65% of 800
+	leftPanelWidth = 672 // 35% of 1920
+	mapX           = 672
+	mapWidth       = 1248 // 65% of 1920
 )
 
 // Game implements ebiten.Game for the flight tracker display.
@@ -89,10 +89,10 @@ func (g *Game) initFonts() {
 	if err != nil {
 		boldSource = sbSource
 	}
-	g.fontFaceSm = &text.GoTextFace{Source: regSource, Size: 11}
-	g.fontFace = &text.GoTextFace{Source: medSource, Size: 15}
-	g.fontFaceLg = &text.GoTextFace{Source: sbSource, Size: 22}
-	g.fontFaceXl = &text.GoTextFace{Source: boldSource, Size: 30}
+	g.fontFaceSm = &text.GoTextFace{Source: regSource, Size: 18}
+	g.fontFace = &text.GoTextFace{Source: medSource, Size: 26}
+	g.fontFaceLg = &text.GoTextFace{Source: sbSource, Size: 38}
+	g.fontFaceXl = &text.GoTextFace{Source: boldSource, Size: 52}
 }
 
 // Update is called every tick (30 TPS).
@@ -240,26 +240,26 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	}
 
 	// ── Airline Logo Card ──
-	logoCardX := float32(12)
-	logoCardY := float32(12)
-	logoCardW := float32(leftPanelWidth - 24)
-	logoCardH := float32(120)
-	logoCardR := float32(10)
+	logoCardX := float32(28)
+	logoCardY := float32(28)
+	logoCardW := float32(leftPanelWidth - 56)
+	logoCardH := float32(240)
+	logoCardR := float32(16)
 
 	drawRoundedRect(screen, logoCardX, logoCardY, logoCardW, logoCardH, logoCardR, color.RGBA{0xf5, 0xf5, 0xf5, 0xff})
 	g.drawAirlineLogo(screen, flight, logoCardX, logoCardY, logoCardW, logoCardH)
 
-	y := float64(logoCardY+logoCardH) + 12
+	y := float64(logoCardY+logoCardH) + 28
 
 	// ── Airline Name ──
 	airlineName := g.resolveAirlineName(flight)
-	drawText(screen, airlineName, 16, y, g.fontFaceXl, color.White)
-	y += 28
+	drawText(screen, airlineName, 36, y, g.fontFaceXl, color.White)
+	y += 56
 
 	// ── Flight Code ──
 	flightCode := flight.DisplayIdent()
-	drawText(screen, flightCode, 16, y, g.fontFaceLg, color.RGBA{0x00, 0xbb, 0xff, 0xff})
-	y += 24
+	drawText(screen, flightCode, 36, y, g.fontFaceLg, color.RGBA{0x00, 0xbb, 0xff, 0xff})
+	y += 48
 
 	// ── Route with country flag ──
 	var routeText string
@@ -272,11 +272,11 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		flagAirport = flight.Destination
 	}
 	if routeText != "" {
-		drawText(screen, routeText, 16, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
+		drawText(screen, routeText, 36, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
 		if flagAirport != nil {
-			g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
+			g.drawCountryFlag(screen, flagAirport, 36+textWidth(routeText, g.fontFace)+12, y-1)
 		}
-		y += 24
+		y += 44
 	}
 
 	// ── Aircraft type ──
@@ -288,13 +288,13 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		if acType == "" {
 			acType = flight.AircraftType
 		}
-		drawText(screen, acType, 16, y, g.fontFace, color.RGBA{0x99, 0x99, 0x99, 0xff})
-		y += 24
+		drawText(screen, acType, 36, y, g.fontFace, color.RGBA{0x99, 0x99, 0x99, 0xff})
+		y += 44
 	}
 
 	// ── Separator ──
-	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
-	y += 12
+	vector.DrawFilledRect(screen, 36, float32(y), leftPanelWidth-72, 2, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
+	y += 28
 
 	// ── Metrics ──
 	if fwp.Position != nil {
@@ -316,16 +316,16 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		}
 
 		for i, label := range labels {
-			drawText(screen, label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
-			y += 14
+			drawText(screen, label, 36, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
+			y += 28
 
 			if loading {
-				barW := float32(100 + i*30)
-				drawRoundedRect(screen, 16, float32(y)+4, barW, 22, 4, color.RGBA{0x1a, 0x1a, 0x1a, 0xff})
+				barW := float32(200 + i*60)
+				drawRoundedRect(screen, 36, float32(y)+6, barW, 44, 8, color.RGBA{0x1a, 0x1a, 0x1a, 0xff})
 			} else {
-				drawText(screen, values[i], 16, y, g.fontFaceXl, color.White)
+				drawText(screen, values[i], 36, y, g.fontFaceXl, color.White)
 			}
-			y += 32
+			y += 60
 		}
 
 		// ── Altitude Status ──
@@ -345,7 +345,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 				altClr = color.RGBA{0xaa, 0xaa, 0xaa, 0xff}
 			}
 			if altStatus != "" {
-				drawText(screen, altStatus, 16, y, g.fontFaceLg, altClr)
+				drawText(screen, altStatus, 36, y, g.fontFaceLg, altClr)
 			}
 		}
 	}
@@ -514,8 +514,8 @@ func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *provider.AirportRe
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
 			op := &ebiten.DrawImageOptions{}
 			bounds := img.Bounds()
-			scaleX := 22.0 / float64(bounds.Dx())
-			scaleY := 16.0 / float64(bounds.Dy())
+			scaleX := 40.0 / float64(bounds.Dx())
+			scaleY := 28.0 / float64(bounds.Dy())
 			op.GeoM.Scale(scaleX, scaleY)
 			op.GeoM.Translate(x, y+1)
 			screen.DrawImage(img, op)
