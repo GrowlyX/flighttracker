@@ -98,12 +98,12 @@ func (a *AeroAPIProvider) GetFlightsNear(airportICAO string, direction FlightDir
 }
 
 // GetFlightPosition returns the latest position for a flight.
-func (a *AeroAPIProvider) GetFlightPosition(flightID string) (*FlightPosition, error) {
+func (a *AeroAPIProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
 	var raw struct {
 		LastPosition *aeroPosition `json:"last_position"`
 		ActualOn     *time.Time    `json:"actual_on"`
 	}
-	if err := a.doRequest("/flights/"+url.PathEscape(flightID)+"/position", nil, &raw); err != nil {
+	if err := a.doRequest("/flights/"+url.PathEscape(flight.FlightID)+"/position", nil, &raw); err != nil {
 		return nil, err
 	}
 	if raw.LastPosition == nil {

@@ -32,26 +32,6 @@ const (
 	mapWidth       = 560 // 70% of 800
 )
 
-// AirlineInfo maps ICAO codes to display names.
-var airlineNames = map[string]string{
-	"UAL": "United Airlines", "AAL": "American Airlines", "DAL": "Delta Air Lines",
-	"SWA": "Southwest Airlines", "ASA": "Alaska Airlines", "JBU": "JetBlue Airways",
-	"NKS": "Spirit Airlines", "FFT": "Frontier Airlines", "HAL": "Hawaiian Airlines",
-	"SKW": "SkyWest Airlines", "RPA": "Republic Airways", "ENY": "Envoy Air",
-	"PDT": "Piedmont Airlines", "PSA": "PSA Airlines", "MXY": "Breeze Airways",
-	"AFR": "Air France", "BAW": "British Airways", "DLH": "Lufthansa",
-	"KLM": "KLM", "ANA": "All Nippon Airways", "JAL": "Japan Airlines",
-	"CPA": "Cathay Pacific", "SIA": "Singapore Airlines", "QFA": "Qantas",
-	"EVA": "EVA Air", "CAL": "China Airlines", "CCA": "Air China",
-	"CSN": "China Southern", "CES": "China Eastern", "KAL": "Korean Air",
-	"THA": "Thai Airways", "UAE": "Emirates", "ETD": "Etihad Airways",
-	"THY": "Turkish Airlines", "ACA": "Air Canada", "AMX": "Aeromexico",
-	"VIR": "Virgin Atlantic", "FIN": "Finnair", "SAS": "Scandinavian Airlines",
-	"TAP": "TAP Air Portugal", "IBE": "Iberia", "AZA": "ITA Airways",
-	"WJA": "WestJet", "CMP": "Copa Airlines", "AVA": "Avianca",
-	"LAN": "LATAM Airlines", "VOI": "Volaris", "VRD": "Virgin America",
-}
-
 // Game implements ebiten.Game for the flight tracker display.
 type Game struct {
 	tracker    *tracker.Tracker
@@ -306,16 +286,18 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 	}
 }
 
-// resolveAirlineName returns the full airline name.
+// resolveAirlineName returns the full airline name using the airlines.json dataset.
 func (g *Game) resolveAirlineName(flight *provider.Flight) string {
-	if flight.OperatorICAO != "" {
-		if name, ok := airlineNames[flight.OperatorICAO]; ok {
-			return name
+	// Best: lookup by IATA code
+	if flight.OperatorIATA != "" {
+		if a, ok := LookupAirlineByIATA(flight.OperatorIATA); ok {
+			return a.Name
 		}
 	}
+	// Fallback: lookup by operator name
 	if flight.Operator != "" {
-		if name, ok := airlineNames[flight.Operator]; ok {
-			return name
+		if a, ok := LookupAirlineByName(flight.Operator); ok {
+			return a.Name
 		}
 	}
 	return flight.OperatorName()
@@ -391,24 +373,18 @@ func (g *Game) fetchAirlineLogo(code string, flight *provider.Flight) {
 		iataCode = strings.ToLower(flight.OperatorIATA)
 	}
 	if iataCode == "" {
-		icaoToIATA := map[string]string{
-			"UAL": "ua", "AAL": "aa", "DAL": "dl", "SWA": "wn", "ASA": "as",
-			"JBU": "b6", "NKS": "nk", "FFT": "f9", "HAL": "ha", "SKW": "oo",
-			"AFR": "af", "BAW": "ba", "DLH": "lh", "KLM": "kl", "ANA": "nh",
-			"JAL": "jl", "CPA": "cx", "SIA": "sq", "QFA": "qf", "EVA": "br",
-			"UAE": "ek", "ETD": "ey", "THY": "tk", "ACA": "ac",
-		}
-		if mapped, ok := icaoToIATA[code]; ok {
-			iataCode = mapped
-		} else {
-			iataCode = strings.ToLower(code)
-		}
+		iataCode = strings.ToLower(code)
 	}
 
-	urls := []string{
+	// Build URL list: prefer card_image from airlines.json, then external services
+	var urls []string
+	if a, ok := LookupAirlineByIATA(iataCode); ok && a.CardImage != "" {
+		urls = append(urls, a.CardImage)
+	}
+	urls = append(urls,
 		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_350_350_s.png", iataCode),
 		fmt.Sprintf("https://pics.avs.io/350/350/%s.png", strings.ToUpper(iataCode)),
-	}
+	)
 
 	for _, u := range urls {
 		img := tryFetchImage(u)

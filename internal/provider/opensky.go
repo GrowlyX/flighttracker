@@ -3,12 +3,16 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 const openskyBaseURL = "https://opensky-network.org/api"
+const openskyTokenURL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 
 // SFO coordinates for bounding box.
 const (
@@ -17,18 +21,25 @@ const (
 )
 
 // OpenSkyProvider implements FlightProvider using the OpenSky Network REST API.
-// Works without credentials (anonymous, 10 req/10s limit).
+// Supports OAuth2 client credentials flow (required for accounts created since mid-March 2025).
 type OpenSkyProvider struct {
-	username   string // optional, for better rate limits
-	password   string // optional
-	httpClient *http.Client
+	clientID     string // OAuth2 client_id (env: OPENSKY_USER)
+	clientSecret string // OAuth2 client_secret (env: OPENSKY_PASS)
+	httpClient   *http.Client
+
+	// OAuth2 token cache
+	mu          sync.Mutex
+	accessToken string
+	tokenExpiry time.Time
 }
 
-// NewOpenSkyProvider creates a new OpenSky provider. Username/password are optional.
-func NewOpenSkyProvider(username, password string) *OpenSkyProvider {
+// NewOpenSkyProvider creates a new OpenSky provider.
+// clientID and clientSecret are for OAuth2 client credentials flow.
+// If empty, requests are made anonymously (lower rate limits).
+func NewOpenSkyProvider(clientID, clientSecret string) *OpenSkyProvider {
 	return &OpenSkyProvider{
-		username: username,
-		password: password,
+		clientID:     clientID,
+		clientSecret: clientSecret,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -36,6 +47,65 @@ func NewOpenSkyProvider(username, password string) *OpenSkyProvider {
 }
 
 func (o *OpenSkyProvider) Name() string { return "opensky" }
+
+// getToken returns a valid OAuth2 access token, fetching or refreshing as needed.
+func (o *OpenSkyProvider) getToken() (string, error) {
+	if o.clientID == "" {
+		return "", nil // anonymous access
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Return cached token if still valid (with 30s buffer)
+	if o.accessToken != "" && time.Now().Add(30*time.Second).Before(o.tokenExpiry) {
+		return o.accessToken, nil
+	}
+
+	// Fetch new token via client credentials grant
+	data := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {o.clientID},
+		"client_secret": {o.clientSecret},
+	}
+
+	resp, err := o.httpClient.Post(openskyTokenURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("opensky oauth: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("opensky oauth: HTTP %d from token endpoint", resp.StatusCode)
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"` // seconds
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("opensky oauth: decode error: %w", err)
+	}
+
+	o.accessToken = tokenResp.AccessToken
+	o.tokenExpiry = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+	log.Printf("[opensky] OAuth2 token acquired, expires in %ds", tokenResp.ExpiresIn)
+	return o.accessToken, nil
+}
+
+// setAuth adds authentication to a request (Bearer token or anonymous).
+func (o *OpenSkyProvider) setAuth(req *http.Request) error {
+	token, err := o.getToken()
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return nil
+}
 
 // GetFlightsNear returns airborne flights in a bounding box around the airport.
 func (o *OpenSkyProvider) GetFlightsNear(airportICAO string, direction FlightDirection) ([]Flight, error) {
@@ -47,16 +117,16 @@ func (o *OpenSkyProvider) GetFlightsNear(airportICAO string, direction FlightDir
 	lomin := lon - delta
 	lomax := lon + delta
 
-	url := fmt.Sprintf("%s/states/all?lamin=%.4f&lomin=%.4f&lamax=%.4f&lomax=%.4f",
+	apiURL := fmt.Sprintf("%s/states/all?lamin=%.4f&lomin=%.4f&lamax=%.4f&lomax=%.4f",
 		openskyBaseURL, lamin, lomin, lamax, lomax)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("opensky: %w", err)
 	}
 	req.Header.Set("User-Agent", "SFOFlightTracker/1.0")
-	if o.username != "" {
-		req.SetBasicAuth(o.username, o.password)
+	if err := o.setAuth(req); err != nil {
+		return nil, fmt.Errorf("opensky: auth failed: %w", err)
 	}
 
 	resp, err := o.httpClient.Do(req)
@@ -84,18 +154,76 @@ func (o *OpenSkyProvider) GetFlightsNear(airportICAO string, direction FlightDir
 	return flights, nil
 }
 
-// GetFlightPosition returns position for an OpenSky flight (callsign-based lookup).
-func (o *OpenSkyProvider) GetFlightPosition(flightID string) (*FlightPosition, error) {
-	// flightID is the ICAO24 hex address for OpenSky.
-	url := fmt.Sprintf("%s/states/all?icao24=%s", openskyBaseURL, flightID)
+// GetFlightPosition returns position for a flight using callsign or ICAO24 hex.
+// When called cross-provider, the FlightID may not be an ICAO24 hex, so we
+// fall back to searching by callsign in a bounding box around SFO.
+func (o *OpenSkyProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
+	callsign := flight.Ident
+	if callsign == "" {
+		callsign = flight.IdentICAO
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	// Try ICAO24 lookup first if FlightID looks like a hex address (6-char hex)
+	if isHexAddr(flight.FlightID) {
+		pos, err := o.getPositionByICAO24(flight.FlightID)
+		if err == nil {
+			return pos, nil
+		}
+		// Fall through to callsign search
+	}
+
+	// Search by callsign in a wide area around SFO
+	delta := 5.0 // wider box for position polling
+	apiURL := fmt.Sprintf("%s/states/all?lamin=%.4f&lomin=%.4f&lamax=%.4f&lomax=%.4f",
+		openskyBaseURL, sfoLatOS-delta, sfoLonOS-delta, sfoLatOS+delta, sfoLonOS+delta)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("opensky: %w", err)
 	}
 	req.Header.Set("User-Agent", "SFOFlightTracker/1.0")
-	if o.username != "" {
-		req.SetBasicAuth(o.username, o.password)
+	if err := o.setAuth(req); err != nil {
+		return nil, fmt.Errorf("opensky: auth failed: %w", err)
+	}
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opensky: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("opensky: HTTP %d", resp.StatusCode)
+	}
+
+	var raw openskyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("opensky: decode error: %w", err)
+	}
+
+	// Find the matching callsign
+	for _, s := range raw.States {
+		f := stateToFlight(s)
+		if strings.EqualFold(f.Ident, callsign) || strings.EqualFold(f.IdentICAO, callsign) {
+			pos := stateToPosition(s)
+			return &pos, nil
+		}
+	}
+
+	return nil, fmt.Errorf("opensky: aircraft %q not found in area", callsign)
+}
+
+// getPositionByICAO24 looks up a single aircraft by its ICAO24 transponder hex.
+func (o *OpenSkyProvider) getPositionByICAO24(icao24 string) (*FlightPosition, error) {
+	apiURL := fmt.Sprintf("%s/states/all?icao24=%s", openskyBaseURL, icao24)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("opensky: %w", err)
+	}
+	req.Header.Set("User-Agent", "SFOFlightTracker/1.0")
+	if err := o.setAuth(req); err != nil {
+		return nil, fmt.Errorf("opensky: auth failed: %w", err)
 	}
 
 	resp, err := o.httpClient.Do(req)
@@ -114,11 +242,24 @@ func (o *OpenSkyProvider) GetFlightPosition(flightID string) (*FlightPosition, e
 	}
 
 	if len(raw.States) == 0 {
-		return nil, fmt.Errorf("opensky: aircraft not found")
+		return nil, fmt.Errorf("opensky: ICAO24 %s not found", icao24)
 	}
 
 	pos := stateToPosition(raw.States[0])
 	return &pos, nil
+}
+
+// isHexAddr returns true if the string looks like a 6-char ICAO24 hex address.
+func isHexAddr(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // ── OpenSky JSON types ──

@@ -8,6 +8,7 @@ type FlightProvider interface {
 	// GetFlightsNear returns en-route flights near the given airport.
 	GetFlightsNear(airportICAO string, direction FlightDirection) ([]Flight, error)
 
-	// GetFlightPosition returns the latest position for a flight by its provider-specific ID.
-	GetFlightPosition(flightID string) (*FlightPosition, error)
+	// GetFlightPosition returns the latest position for a flight.
+	// Accepts the full Flight so each provider can use its preferred lookup field.
+	GetFlightPosition(flight *Flight) (*FlightPosition, error)
 }

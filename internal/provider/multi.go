@@ -141,11 +141,11 @@ func (m *MultiProvider) GetFlightsNear(airportICAO string, direction FlightDirec
 
 // GetFlightPosition tries the active provider first (if it has capacity),
 // then falls back to others sorted by capacity.
-func (m *MultiProvider) GetFlightPosition(flightID string) (*FlightPosition, error) {
+func (m *MultiProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
 	// Try the active provider first if it has capacity.
 	if m.activeIdx < len(m.entries) && m.canUse(m.activeIdx) {
 		m.recordUse(m.activeIdx)
-		pos, err := m.entries[m.activeIdx].provider.GetFlightPosition(flightID)
+		pos, err := m.entries[m.activeIdx].provider.GetFlightPosition(flight)
 		if err == nil && pos != nil {
 			return pos, nil
 		}
@@ -171,7 +171,7 @@ func (m *MultiProvider) GetFlightPosition(flightID string) (*FlightPosition, err
 		}
 
 		m.recordUse(i)
-		pos, err := p.GetFlightPosition(flightID)
+		pos, err := p.GetFlightPosition(flight)
 		if err != nil {
 			lastErr = err
 			continue

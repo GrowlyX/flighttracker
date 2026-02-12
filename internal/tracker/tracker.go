@@ -150,7 +150,7 @@ func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
 	const maxErrors = 30
 
 	for range ticker.C {
-		pos, err := t.prov.GetFlightPosition(flight.FlightID)
+		pos, err := t.prov.GetFlightPosition(flight)
 		if err != nil {
 			consecutiveErrors++
 			log.Printf("[tracker] position error (%d/%d): %v", consecutiveErrors, maxErrors, err)

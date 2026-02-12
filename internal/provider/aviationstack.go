@@ -71,10 +71,22 @@ func (a *AviationStackProvider) GetFlightsNear(airportICAO string, direction Fli
 
 // GetFlightPosition returns position for an AviationStack flight.
 // AviationStack includes live data in the flight endpoint.
-func (a *AviationStackProvider) GetFlightPosition(flightID string) (*FlightPosition, error) {
+func (a *AviationStackProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
+	// Use best available flight identifier
+	flightCode := flight.IdentIATA
+	paramKey := "flight_iata"
+	if flightCode == "" {
+		flightCode = flight.IdentICAO
+		paramKey = "flight_icao"
+	}
+	if flightCode == "" {
+		flightCode = flight.Ident
+		paramKey = "flight_iata" // best guess
+	}
+
 	params := url.Values{
 		"access_key":    {a.apiKey},
-		"flight_iata":   {flightID},
+		paramKey:        {flightCode},
 		"flight_status": {"active"},
 	}
 
