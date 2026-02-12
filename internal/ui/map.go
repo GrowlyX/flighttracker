@@ -39,9 +39,10 @@ type MapRenderer struct {
 	x, y, w, h float32
 
 	// Map state
-	centerLat, centerLon float64
-	zoom                 float64
-	targetZoom           float64
+	centerLat, centerLon             float64
+	targetCenterLat, targetCenterLon float64
+	zoom                             float64
+	targetZoom                       float64
 
 	// Tile cache
 	tileCache sync.Map // map[TileKey]*ebiten.Image
@@ -88,41 +89,44 @@ func tileXYToLatLon(x, y float64, zoom int) (float64, float64) {
 // Update recalculates the map viewport to fit both SFO and the plane.
 func (m *MapRenderer) Update(planeLat, planeLon float64) {
 	if planeLat == 0 && planeLon == 0 {
-		m.centerLat = sfoLat
-		m.centerLon = sfoLon
+		m.targetCenterLat = sfoLat
+		m.targetCenterLon = sfoLon
 		m.targetZoom = 12
 	} else {
 		// Center between SFO and plane
-		m.centerLat = (sfoLat + planeLat) / 2
-		m.centerLon = (sfoLon + planeLon) / 2
+		m.targetCenterLat = (sfoLat + planeLat) / 2
+		m.targetCenterLon = (sfoLon + planeLon) / 2
 
-		// Calculate zoom to fit both points with padding
+		// Continuous zoom formula
 		latDiff := math.Abs(sfoLat - planeLat)
 		lonDiff := math.Abs(sfoLon - planeLon)
 		maxDiff := math.Max(latDiff, lonDiff)
 
-		// More aggressive zoom: tighter framing of the area
 		if maxDiff < 0.02 {
-			m.targetZoom = 15 // Very close, like just departed
-		} else if maxDiff < 0.1 {
-			m.targetZoom = 13
-		} else if maxDiff < 0.5 {
-			m.targetZoom = 11
-		} else if maxDiff < 2 {
-			m.targetZoom = 9
-		} else if maxDiff < 5 {
-			m.targetZoom = 7
-		} else if maxDiff < 15 {
-			m.targetZoom = 5
-		} else if maxDiff < 40 {
-			m.targetZoom = 4
-		} else {
-			m.targetZoom = 3
+			maxDiff = 0.02 // floor to prevent extreme zoom-in
 		}
+
+		// zoom ≈ 8.5 - 3.0 * log2(maxDiff)
+		newZoom := 8.5 - 3.0*math.Log2(maxDiff)
+		newZoom = math.Max(3, math.Min(12, newZoom)) // cap at 12 (was 15)
+
+		m.targetZoom = newZoom
 	}
 
-	// Smooth zoom transition
-	m.zoom += (m.targetZoom - m.zoom) * 0.1
+	// Smooth center panning
+	centerBlend := 0.06
+	m.centerLat += (m.targetCenterLat - m.centerLat) * centerBlend
+	m.centerLon += (m.targetCenterLon - m.centerLon) * centerBlend
+
+	// Rate-limited smooth zoom transition
+	diff := m.targetZoom - m.zoom
+	maxStep := 0.05
+	if diff > maxStep {
+		diff = maxStep
+	} else if diff < -maxStep {
+		diff = -maxStep
+	}
+	m.zoom += diff
 }
 
 // latLonToScreen converts geographic coordinates to screen pixel coordinates.
@@ -144,7 +148,7 @@ func (m *MapRenderer) latLonToScreen(lat, lon float64) (float32, float32) {
 }
 
 // Draw renders the tile map onto the screen.
-func (m *MapRenderer) Draw(screen *ebiten.Image, planeLat, planeLon float64, heading *int) {
+func (m *MapRenderer) Draw(screen *ebiten.Image, planeLat, planeLon float64, heading *int, trail [][2]float64) {
 	// Black background for the map area
 	vector.DrawFilledRect(screen, m.x, m.y, m.w, m.h, color.Black, false)
 
@@ -205,8 +209,11 @@ func (m *MapRenderer) Draw(screen *ebiten.Image, planeLat, planeLon float64, hea
 		vector.DrawFilledRect(screen, m.x, 0, m.w, m.y, color.Black, false)
 	}
 
-	// Draw route line from SFO to plane
-	if planeLat != 0 || planeLon != 0 {
+	// Draw trail from recorded positions (replaces straight line)
+	if len(trail) > 1 {
+		m.drawTrail(screen, trail)
+	} else if planeLat != 0 || planeLon != 0 {
+		// Fallback: straight line if no trail yet
 		m.drawRouteLine(screen, planeLat, planeLon)
 	}
 
@@ -271,6 +278,34 @@ func (m *MapRenderer) fetchTile(key TileKey) {
 
 	ebiImg := ebiten.NewImageFromImage(img)
 	m.tileCache.Store(key, ebiImg)
+}
+
+// drawTrail draws the actual recorded flight path as a polyline with fading tail.
+func (m *MapRenderer) drawTrail(screen *ebiten.Image, trail [][2]float64) {
+	n := len(trail)
+	if n < 2 {
+		return
+	}
+
+	for i := 0; i < n-1; i++ {
+		x1, y1 := m.latLonToScreen(trail[i][0], trail[i][1])
+		x2, y2 := m.latLonToScreen(trail[i+1][0], trail[i+1][1])
+
+		// Skip segments that wrap or are outside visible area
+		if math.Abs(float64(x2-x1)) > float64(m.w)/2 {
+			continue
+		}
+
+		// Fade opacity: older points are more transparent
+		progress := float64(i) / float64(n-1)  // 0 = oldest, 1 = newest
+		alpha := uint8(40 + int(progress*180)) // 40..220
+		lineColor := color.RGBA{0x00, 0xcc, 0xff, alpha}
+
+		// Thicker near current position
+		width := float32(1.5 + progress*1.5) // 1.5..3.0
+
+		vector.StrokeLine(screen, x1, y1, x2, y2, width, lineColor, true)
+	}
 }
 
 // drawRouteLine draws a great circle arc from SFO to the plane.

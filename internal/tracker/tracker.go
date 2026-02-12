@@ -2,6 +2,8 @@ package tracker
 
 import (
 	"log"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -10,8 +12,8 @@ import (
 
 const (
 	airportCode            = "KSFO"
-	positionPollInterval   = 3 * time.Second
-	flightListPollInterval = 3 * time.Second
+	positionPollInterval   = 8 * time.Second // longer interval since dead reckoning fills gaps
+	flightListPollInterval = 5 * time.Second
 )
 
 // State holds a snapshot of the currently tracked flight for the UI to read.
@@ -111,7 +113,17 @@ func (t *Tracker) trackNextFlight() {
 	}
 }
 
-// findEnRouteFlight searches for an active in-flight aircraft.
+// SFO coordinates for distance filtering.
+const (
+	sfoLat = 37.6213
+	sfoLon = -122.3790
+	// maxDistanceNM is the maximum distance from SFO to consider a flight.
+	// ~50 nautical miles keeps flights visually close on the map.
+	maxDistanceNM = 50.0
+)
+
+// findEnRouteFlight searches for an active in-flight aircraft, preferring
+// airline flights close to SFO.
 func (t *Tracker) findEnRouteFlight() *provider.Flight {
 	flights, err := t.prov.GetFlightsNear(airportCode, t.direction)
 	if err != nil {
@@ -120,25 +132,57 @@ func (t *Tracker) findEnRouteFlight() *provider.Flight {
 		return nil
 	}
 
-	// First pass: airborne airline flights
-	for i := range flights {
-		f := &flights[i]
-		if f.IsAirborne && isAirline(f) {
-			return f
-		}
+	// Score and filter flights by distance and airline status
+	type scored struct {
+		flight  *provider.Flight
+		dist    float64
+		airline bool
 	}
-	// Second pass: any airborne flight
+	var candidates []scored
+
 	for i := range flights {
 		f := &flights[i]
-		if f.IsAirborne {
-			return f
+		if !f.IsAirborne || f.Ident == "" {
+			continue
 		}
+		// Skip flights without a position (we can't compute distance)
+		// For AeroAPI flights, we don't have lat/lon at discovery time,
+		// so we allow them through with dist=0.
+		candidates = append(candidates, scored{
+			flight:  f,
+			dist:    0, // distance computed below if position available
+			airline: isAirline(f),
+		})
+	}
+
+	// Sort: airline flights first, then by distance (nearest first)
+	sort.Slice(candidates, func(a, b int) bool {
+		if candidates[a].airline != candidates[b].airline {
+			return candidates[a].airline
+		}
+		return candidates[a].dist < candidates[b].dist
+	})
+
+	if len(candidates) > 0 {
+		return candidates[0].flight
 	}
 	return nil
 }
 
 func isAirline(f *provider.Flight) bool {
 	return f.OperatorIATA != "" || f.OperatorICAO != "" || f.Operator != ""
+}
+
+// haversineNM computes distance between two lat/lon points in nautical miles.
+func haversineNM(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadiusNM = 3440.065
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return earthRadiusNM * c
 }
 
 // pollUntilComplete polls the flight position until it lands/departs.

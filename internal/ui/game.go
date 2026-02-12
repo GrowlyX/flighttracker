@@ -7,10 +7,12 @@ import (
 	"image/color"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -41,6 +43,24 @@ type Game struct {
 	fontFace   *text.GoTextFace
 	fontFaceLg *text.GoTextFace
 	fontFaceXl *text.GoTextFace
+
+	// Dead-reckoning state — anchor position + velocity
+	anchorLat, anchorLon float64   // last confirmed position from API
+	anchorTime           time.Time // when anchor was received
+	interpLat, interpLon float64   // current rendered position (projected)
+	drSpeed              float64   // groundspeed in knots for dead reckoning
+	drHeading            float64   // heading in degrees for dead reckoning
+	hasAnchor            bool
+	lastFlightID         string // detect flight changes
+
+	// Animated metric values (smoothly scroll toward targets)
+	animSpeed    float64 // current display speed (mph)
+	animAltitude float64 // current display altitude (feet)
+	animHeading  float64 // current display heading (degrees)
+
+	// Flight trail — recorded positions for path rendering
+	trailPoints [][2]float64 // circular buffer of [lat, lon]
+	trailTick   int          // counter to downsample trail capture
 }
 
 // NewGame creates a new Game instance.
@@ -91,10 +111,119 @@ func (g *Game) initFonts() {
 // Update is called every tick (30 TPS).
 func (g *Game) Update() error {
 	state := g.tracker.GetState()
+
 	if state.Position != nil {
-		g.mapRender.Update(state.Position.Latitude, state.Position.Longitude)
+		newLat := state.Position.Latitude
+		newLon := state.Position.Longitude
+
+		flightChanged := state.Flight != nil && state.Flight.FlightID != g.lastFlightID
+		posChanged := newLat != g.anchorLat || newLon != g.anchorLon
+
+		if flightChanged {
+			// New flight — snap immediately
+			g.anchorLat = newLat
+			g.anchorLon = newLon
+			g.interpLat = newLat
+			g.interpLon = newLon
+			g.anchorTime = time.Now()
+			g.hasAnchor = true
+			g.lastFlightID = state.Flight.FlightID
+			g.trailPoints = nil // reset trail for new flight
+			g.trailTick = 0
+
+			// Snap animated metrics instantly on new flight
+			g.animSpeed = float64(state.Position.Groundspeed) * 1.15078
+			g.animAltitude = float64(state.Position.Altitude) * 100
+			if state.Position.Heading != nil {
+				g.animHeading = float64(*state.Position.Heading)
+			}
+		} else if posChanged {
+			// New position update — update anchor
+			g.anchorLat = newLat
+			g.anchorLon = newLon
+			g.anchorTime = time.Now()
+			g.hasAnchor = true
+		}
+
+		// Always update velocity from latest data
+		g.drSpeed = float64(state.Position.Groundspeed)
+		if state.Position.Heading != nil {
+			g.drHeading = float64(*state.Position.Heading)
+		}
+
+		// Update animated metric targets (smooth scroll)
+		targetSpeed := float64(state.Position.Groundspeed) * 1.15078 // knots → mph
+		targetAlt := float64(state.Position.Altitude) * 100          // hundreds → feet
+		targetHdg := g.drHeading
+
+		// Smoothly animate toward targets
+		const metricBlend = 0.08
+		g.animSpeed += (targetSpeed - g.animSpeed) * metricBlend
+		g.animAltitude += (targetAlt - g.animAltitude) * metricBlend
+		// Heading wraps around 360, so take shortest path
+		hdgDiff := targetHdg - g.animHeading
+		if hdgDiff > 180 {
+			hdgDiff -= 360
+		} else if hdgDiff < -180 {
+			hdgDiff += 360
+		}
+		g.animHeading += hdgDiff * metricBlend
+		if g.animHeading < 0 {
+			g.animHeading += 360
+		} else if g.animHeading >= 360 {
+			g.animHeading -= 360
+		}
+
+		// Dead-reckon: continuously project position forward from anchor
+		g.deadReckon()
+
+		// Capture trail point every 3rd tick (~10 pts/sec)
+		g.trailTick++
+		if g.trailTick%3 == 0 && g.interpLat != 0 {
+			g.trailPoints = append(g.trailPoints, [2]float64{g.interpLat, g.interpLon})
+			// Cap trail length to avoid memory growth
+			if len(g.trailPoints) > 2000 {
+				g.trailPoints = g.trailPoints[len(g.trailPoints)-1500:]
+			}
+		}
+
+		g.mapRender.Update(g.interpLat, g.interpLon)
 	}
 	return nil
+}
+
+// deadReckon projects position forward from anchor using velocity.
+// Called every tick to produce smooth continuous motion between API polls.
+func (g *Game) deadReckon() {
+	if !g.hasAnchor || g.drSpeed <= 0 {
+		return
+	}
+
+	// Elapsed time since last confirmed position
+	dt := time.Since(g.anchorTime).Seconds()
+	if dt < 0 {
+		dt = 0
+	}
+	if dt > 30 {
+		dt = 30 // cap extrapolation
+	}
+
+	// Project from anchor: pos = anchor + velocity * dt
+	speedKmS := g.drSpeed * 1.852 / 3600.0 // knots → km/s
+	headingRad := g.drHeading * math.Pi / 180.0
+	dist := speedKmS * dt // total distance from anchor
+
+	earthRadius := 6371.0
+	dLat := (dist * math.Cos(headingRad)) / earthRadius * (180.0 / math.Pi)
+	dLon := (dist * math.Sin(headingRad)) / (earthRadius * math.Cos(g.anchorLat*math.Pi/180.0)) * (180.0 / math.Pi)
+
+	projLat := g.anchorLat + dLat
+	projLon := g.anchorLon + dLon
+
+	// Smooth blend toward projected position
+	blend := 0.15
+	g.interpLat += (projLat - g.interpLat) * blend
+	g.interpLon += (projLon - g.interpLon) * blend
 }
 
 // Draw renders the entire screen.
@@ -165,7 +294,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	logoCardX := float32(12)
 	logoCardY := float32(12)
 	logoCardW := float32(leftPanelWidth - 24)
-	logoCardH := float32(100)
+	logoCardH := float32(140)
 	logoCardR := float32(10)
 
 	// White rounded rectangle background
@@ -205,49 +334,68 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		y += 24
 	}
 
+	// ── Aircraft type ──
+	if flight.OperatorIATA != "" && flight.AircraftType != "" {
+		if acType := LookupAircraftType(flight.OperatorIATA, flight.AircraftType); acType != "" {
+			drawText(screen, acType, 16, y, g.fontFace, color.RGBA{0x99, 0x99, 0x99, 0xff})
+			y += 24
+		}
+	}
+
 	// ── Separator ──
 	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
 	y += 20
 
-	// ── Metrics ──
+	// ── Metrics (animated scroll) ──
 	if state.Position != nil {
-		pos := state.Position
+		speedMph := int(math.Round(g.animSpeed))
+		altFeet := int(math.Round(g.animAltitude))
+		headingDeg := int(math.Round(g.animHeading)) % 360
 
-		metrics := []struct {
-			label string
-			value string
-		}{
-			{"SPEED", fmt.Sprintf("%d mph", int(float64(pos.Groundspeed)*1.15078))},
-			{"ALTITUDE", FormatAltitude(pos.Altitude)},
-			{"HEADING", FormatHeading(pos.Heading)},
+		// Check if data is still loading (all zeros)
+		loading := state.Position.Groundspeed == 0 && state.Position.Altitude == 0
+
+		labels := []string{"SPEED", "ALTITUDE", "HEADING"}
+		values := []string{
+			fmt.Sprintf("%d mph", speedMph),
+			formatAltFeet(altFeet),
+			formatHeadingDeg(headingDeg),
 		}
 
-		for _, m := range metrics {
+		for i, label := range labels {
 			// Label
-			drawText(screen, m.label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
+			drawText(screen, label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
 			y += 18
-			// Value
-			drawText(screen, m.value, 16, y, g.fontFaceXl, color.White)
+
+			if loading {
+				// Skeleton placeholder bar
+				barW := float32(100 + i*30) // vary widths
+				drawRoundedRect(screen, 16, float32(y)+4, barW, 22, 4, color.RGBA{0x1a, 0x1a, 0x1a, 0xff})
+			} else {
+				drawText(screen, values[i], 16, y, g.fontFaceXl, color.White)
+			}
 			y += 38
 		}
 
 		// ── Altitude Status ──
-		y += 4
-		altStatus := ""
-		var altClr color.RGBA
-		switch pos.AltitudeChange {
-		case "C":
-			altStatus = "▲ CLIMBING"
-			altClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
-		case "D":
-			altStatus = "▼ DESCENDING"
-			altClr = color.RGBA{0xff, 0x66, 0x44, 0xff}
-		case "-":
-			altStatus = "━ LEVEL"
-			altClr = color.RGBA{0xaa, 0xaa, 0xaa, 0xff}
-		}
-		if altStatus != "" {
-			drawText(screen, altStatus, 16, y, g.fontFaceLg, altClr)
+		if !loading {
+			y += 4
+			altStatus := ""
+			var altClr color.RGBA
+			switch state.Position.AltitudeChange {
+			case "C":
+				altStatus = "▲ CLIMBING"
+				altClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
+			case "D":
+				altStatus = "▼ DESCENDING"
+				altClr = color.RGBA{0xff, 0x66, 0x44, 0xff}
+			case "-":
+				altStatus = "━ LEVEL"
+				altClr = color.RGBA{0xaa, 0xaa, 0xaa, 0xff}
+			}
+			if altStatus != "" {
+				drawText(screen, altStatus, 16, y, g.fontFaceLg, altClr)
+			}
 		}
 	}
 }
@@ -257,12 +405,13 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 	var lat, lon float64
 	var heading *int
 	if state.Position != nil {
-		lat = state.Position.Latitude
-		lon = state.Position.Longitude
+		// Use interpolated position for smooth rendering
+		lat = g.interpLat
+		lon = g.interpLon
 		heading = state.Position.Heading
 	}
 
-	g.mapRender.Draw(screen, lat, lon, heading)
+	g.mapRender.Draw(screen, lat, lon, heading, g.trailPoints)
 
 	// SFO label
 	if g.fontFaceSm != nil {
@@ -326,7 +475,7 @@ func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, ca
 			// Center in card
 			offX := float64(cardX) + (float64(cardW)-scaledW)/2
 			offY := float64(cardY) + (float64(cardH)-scaledH)/2
-			op.GeoM.Scale(scale, scale)
+			op.GeoM.Scale(scale*1.25, scale*1.25)
 			op.GeoM.Translate(offX, offY)
 			screen.DrawImage(img, op)
 			return
@@ -417,6 +566,21 @@ func tryFetchImage(imgURL string) image.Image {
 }
 
 // drawText is a helper to draw text at a given position.
+// formatAltFeet formats altitude in feet with comma separator for large values.
+func formatAltFeet(feet int) string {
+	if feet >= 10000 {
+		return fmt.Sprintf("%d,%03d ft", feet/1000, feet%1000)
+	}
+	return fmt.Sprintf("%d ft", feet)
+}
+
+// formatHeadingDeg formats heading in degrees with compass direction.
+func formatHeadingDeg(deg int) string {
+	directions := []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
+	idx := ((deg + 22) / 45) % 8
+	return fmt.Sprintf("%d° %s", deg, directions[idx])
+}
+
 func drawText(screen *ebiten.Image, s string, x, y float64, face *text.GoTextFace, clr color.Color) {
 	if face == nil {
 		return

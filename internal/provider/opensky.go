@@ -109,9 +109,9 @@ func (o *OpenSkyProvider) setAuth(req *http.Request) error {
 
 // GetFlightsNear returns airborne flights in a bounding box around the airport.
 func (o *OpenSkyProvider) GetFlightsNear(airportICAO string, direction FlightDirection) ([]Flight, error) {
-	// Use a ~200nm bounding box around the airport.
+	// Use a ~60nm bounding box around the airport.
 	lat, lon := airportCoords(airportICAO)
-	delta := 3.0 // ~3 degrees ≈ 200nm
+	delta := 1.0 // ~1 degree ≈ 60nm — keeps results close to the airport
 	lamin := lat - delta
 	lamax := lat + delta
 	lomin := lon - delta

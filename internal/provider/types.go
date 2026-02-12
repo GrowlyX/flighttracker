@@ -70,19 +70,20 @@ type FlightPosition struct {
 
 // Flight represents a flight.
 type Flight struct {
-	Ident        string
-	IdentICAO    string
-	IdentIATA    string
-	FlightID     string // provider-specific unique ID
-	Operator     string
-	OperatorICAO string
-	OperatorIATA string
-	FlightNumber string
-	Origin       *AirportRef
-	Destination  *AirportRef
-	Status       string
-	AircraftType string
-	IsAirborne   bool
+	Ident          string
+	IdentICAO      string
+	IdentIATA      string
+	FlightID       string // provider-specific unique ID
+	Operator       string
+	OperatorICAO   string
+	OperatorIATA   string
+	FlightNumber   string
+	Origin         *AirportRef
+	Destination    *AirportRef
+	Status         string
+	AircraftType   string
+	IsAirborne     bool
+	SourceProvider string // name of the provider that discovered this flight
 }
 
 // DisplayIdent returns the best flight identifier for display (prefers IATA).

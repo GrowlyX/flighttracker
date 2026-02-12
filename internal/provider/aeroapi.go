@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -209,9 +210,20 @@ type aeroPosition struct {
 }
 
 func (p *aeroPosition) toPosition() FlightPosition {
+	// Normalize altitude_change: AeroAPI may return full words or single chars
+	altChange := p.AltitudeChange
+	switch strings.ToLower(altChange) {
+	case "climbing", "c":
+		altChange = "C"
+	case "descending", "d":
+		altChange = "D"
+	default:
+		altChange = "-"
+	}
+
 	return FlightPosition{
 		Altitude:       p.Altitude,
-		AltitudeChange: p.AltitudeChange,
+		AltitudeChange: altChange,
 		Groundspeed:    p.Groundspeed,
 		Heading:        p.Heading,
 		Latitude:       p.Latitude,
