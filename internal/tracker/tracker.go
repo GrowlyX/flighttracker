@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/subham/flighttracker/internal/aeroapi"
+	"github.com/subham/flighttracker/internal/provider"
 )
 
 const (
@@ -16,30 +16,30 @@ const (
 
 // State holds a snapshot of the currently tracked flight for the UI to read.
 type State struct {
-	Flight    *aeroapi.Flight
-	Position  *aeroapi.FlightPosition
-	Direction aeroapi.FlightDirection
+	Flight    *provider.Flight
+	Position  *provider.FlightPosition
+	Direction provider.FlightDirection
 	Error     string
 	UpdatedAt time.Time
 }
 
 // Tracker manages the flight tracking state machine.
 type Tracker struct {
-	client *aeroapi.Client
+	prov provider.FlightProvider
 
 	mu    sync.RWMutex
 	state State
 
 	// Current tracking context
 	currentFlightID string
-	direction       aeroapi.FlightDirection
+	direction       provider.FlightDirection
 }
 
-// New creates a new Tracker with the given AeroAPI client.
-func New(client *aeroapi.Client) *Tracker {
+// New creates a new Tracker with the given flight provider.
+func New(prov provider.FlightProvider) *Tracker {
 	return &Tracker{
-		client:    client,
-		direction: aeroapi.Arriving,
+		prov:      prov,
+		direction: provider.Departing,
 	}
 }
 
@@ -73,12 +73,12 @@ func (t *Tracker) Run() {
 
 // runCycle performs one full arrive→depart cycle.
 func (t *Tracker) runCycle() {
-	// Phase 2: Track a departing flight
-	t.direction = aeroapi.Departing
+	// Track a departing flight
+	t.direction = provider.Departing
 	t.trackNextFlight()
 
-	// Phase 1: Track an arriving flight
-	t.direction = aeroapi.Arriving
+	// Track an arriving flight
+	t.direction = provider.Arriving
 	t.trackNextFlight()
 }
 
@@ -92,8 +92,8 @@ func (t *Tracker) trackNextFlight() {
 			continue
 		}
 
-		log.Printf("[tracker] tracking %s flight %s (%s)", t.direction, flight.DisplayIdent(), flight.FAFlightID)
-		t.currentFlightID = flight.FAFlightID
+		log.Printf("[tracker] tracking %s flight %s (%s)", t.direction, flight.DisplayIdent(), flight.FlightID)
+		t.currentFlightID = flight.FlightID
 
 		// Set initial state with flight info
 		t.setState(State{
@@ -105,52 +105,44 @@ func (t *Tracker) trackNextFlight() {
 		completed := t.pollUntilComplete(flight)
 		if completed {
 			log.Printf("[tracker] flight %s completed, switching", flight.DisplayIdent())
-			// Brief pause to show final state
 			time.Sleep(3 * time.Second)
 			return
 		}
-		// If not completed (lost tracking), find another flight
 	}
 }
 
 // findEnRouteFlight searches for an active in-flight aircraft.
-func (t *Tracker) findEnRouteFlight() *aeroapi.Flight {
-	var flights []aeroapi.Flight
-	var err error
-
-	if t.direction == aeroapi.Arriving {
-		flights, err = t.client.GetArrivals(airportCode)
-	} else {
-		flights, err = t.client.GetDepartures(airportCode)
-	}
+func (t *Tracker) findEnRouteFlight() *provider.Flight {
+	flights, err := t.prov.GetFlightsNear(airportCode, t.direction)
 	if err != nil {
 		log.Printf("[tracker] error fetching flights: %v", err)
 		t.setError(err)
 		return nil
 	}
 
-	// Find the first en-route flight
+	// First pass: airborne airline flights
 	for i := range flights {
 		f := &flights[i]
-		if f.IsEnRoute() && f.FlightType == "Airline" {
+		if f.IsAirborne && isAirline(f) {
 			return f
 		}
 	}
-
-	// Fallback: any en-route flight
+	// Second pass: any airborne flight
 	for i := range flights {
 		f := &flights[i]
-		if f.IsEnRoute() {
+		if f.IsAirborne {
 			return f
 		}
 	}
-
 	return nil
 }
 
-// pollUntilComplete polls the flight position every second until it lands/departs.
-// Returns true if the flight has completed, false if tracking was lost.
-func (t *Tracker) pollUntilComplete(flight *aeroapi.Flight) bool {
+func isAirline(f *provider.Flight) bool {
+	return f.OperatorIATA != "" || f.OperatorICAO != "" || f.Operator != ""
+}
+
+// pollUntilComplete polls the flight position until it lands/departs.
+func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
 	ticker := time.NewTicker(positionPollInterval)
 	defer ticker.Stop()
 
@@ -158,7 +150,7 @@ func (t *Tracker) pollUntilComplete(flight *aeroapi.Flight) bool {
 	const maxErrors = 30
 
 	for range ticker.C {
-		pos, err := t.client.GetFlightPosition(flight.FAFlightID)
+		pos, err := t.prov.GetFlightPosition(flight.FlightID)
 		if err != nil {
 			consecutiveErrors++
 			log.Printf("[tracker] position error (%d/%d): %v", consecutiveErrors, maxErrors, err)
@@ -170,39 +162,32 @@ func (t *Tracker) pollUntilComplete(flight *aeroapi.Flight) bool {
 		}
 		consecutiveErrors = 0
 
-		// Check if flight has completed
-		if pos.ActualOn != nil && t.direction == aeroapi.Arriving {
-			// Arrival has landed
-			if pos.LastPosition != nil {
-				t.setState(State{
-					Flight:    flight,
-					Position:  pos.LastPosition,
-					Direction: t.direction,
-				})
-			}
+		// For departures, track until they're well airborne (altitude > 100 = 10,000ft)
+		if t.direction == provider.Departing && pos.Altitude > 100 {
+			t.setState(State{
+				Flight:    flight,
+				Position:  pos,
+				Direction: t.direction,
+			})
 			return true
 		}
-		if t.direction == aeroapi.Departing && pos.LastPosition != nil {
-			// For departures, track until they're well airborne (altitude > 100 = 10,000ft)
-			// or we've been tracking for 5+ minutes
-			if pos.LastPosition.Altitude > 100 {
-				t.setState(State{
-					Flight:    flight,
-					Position:  pos.LastPosition,
-					Direction: t.direction,
-				})
-				return true
-			}
+
+		// For arrivals, track until altitude drops to 0 or very low
+		if t.direction == provider.Arriving && pos.Altitude <= 0 {
+			t.setState(State{
+				Flight:    flight,
+				Position:  pos,
+				Direction: t.direction,
+			})
+			return true
 		}
 
 		// Update the current position
-		if pos.LastPosition != nil {
-			t.setState(State{
-				Flight:    flight,
-				Position:  pos.LastPosition,
-				Direction: t.direction,
-			})
-		}
+		t.setState(State{
+			Flight:    flight,
+			Position:  pos,
+			Direction: t.direction,
+		})
 	}
 	return false
 }
