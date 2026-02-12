@@ -7,12 +7,10 @@ import (
 	"image/color"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -44,24 +42,9 @@ type Game struct {
 	fontFaceLg *text.GoTextFace
 	fontFaceXl *text.GoTextFace
 
-	// Dead-reckoning state — anchor position + velocity
-	anchorLat, anchorLon float64   // last confirmed position from API
-	anchorTime           time.Time // when anchor was received
-	interpLat, interpLon float64   // current rendered position (projected)
-	drSpeed              float64   // groundspeed in knots for dead reckoning
-	drHeading            float64   // target heading from API (degrees)
-	drHeadingSmooth      float64   // smoothly interpolated heading for projection
-	hasAnchor            bool
-	lastFlightID         string // detect flight changes
-
-	// Animated metric values (smoothly scroll toward targets)
-	animSpeed    float64 // current display speed (mph)
-	animAltitude float64 // current display altitude (feet)
-	animHeading  float64 // current display heading (degrees)
-
-	// Flight trail — recorded positions for path rendering
-	trailPoints [][2]float64 // circular buffer of [lat, lon]
-	trailTick   int          // counter to downsample trail capture
+	// Featured flight trail
+	trailPoints    [][2]float64
+	lastFeaturedID string // detect featured flight changes
 }
 
 // NewGame creates a new Game instance.
@@ -71,6 +54,9 @@ func NewGame(t *tracker.Tracker) *Game {
 		mapRender: NewMapRenderer(mapX, 0, mapWidth, screenHeight),
 	}
 	g.initFonts()
+
+	// Share the small font with the map renderer for callsign labels
+	g.mapRender.SetLabelFont(g.fontFaceSm)
 
 	// Load airplane icon
 	pngData, err := os.ReadFile("internal/ui/assets/apple_sf_airplane.png")
@@ -113,137 +99,32 @@ func (g *Game) initFonts() {
 func (g *Game) Update() error {
 	state := g.tracker.GetState()
 
-	if state.Position != nil {
-		newLat := state.Position.Latitude
-		newLon := state.Position.Longitude
-
-		flightChanged := state.Flight != nil && state.Flight.FlightID != g.lastFlightID
-		posChanged := newLat != g.anchorLat || newLon != g.anchorLon
-
-		if flightChanged {
-			// New flight — start interpolation from SFO, blend toward plane
-			g.anchorLat = newLat
-			g.anchorLon = newLon
-			g.interpLat = sfoLat // start at SFO for smooth pan-out
-			g.interpLon = sfoLon
-			g.anchorTime = time.Now()
-			g.hasAnchor = true
-			g.lastFlightID = state.Flight.FlightID
-			// Start trail at SFO airport so the line always begins there
-			g.trailPoints = [][2]float64{{sfoLat, sfoLon}}
-			g.trailTick = 0
-
-			// Reset map center to SFO so it pans out smoothly
-			g.mapRender.ResetCenter()
-
-			// Snap animated metrics instantly on new flight
-			g.animSpeed = float64(state.Position.Groundspeed) * 1.15078
-			g.animAltitude = float64(state.Position.Altitude) * 100
-			if state.Position.Heading != nil {
-				g.animHeading = float64(*state.Position.Heading)
-				g.drHeadingSmooth = float64(*state.Position.Heading)
-			}
-		} else if posChanged {
-			// New position update — update anchor
-			g.anchorLat = newLat
-			g.anchorLon = newLon
-			g.anchorTime = time.Now()
-			g.hasAnchor = true
-		}
-
-		// Always update velocity from latest data
-		g.drSpeed = float64(state.Position.Groundspeed)
-		if state.Position.Heading != nil {
-			g.drHeading = float64(*state.Position.Heading)
-		}
-
-		// Update animated metric targets (smooth scroll)
-		targetSpeed := float64(state.Position.Groundspeed) * 1.15078 // knots → mph
-		targetAlt := float64(state.Position.Altitude) * 100          // hundreds → feet
-		targetHdg := g.drHeading
-
-		// Smoothly animate toward targets
-		const metricBlend = 0.08
-		g.animSpeed += (targetSpeed - g.animSpeed) * metricBlend
-		g.animAltitude += (targetAlt - g.animAltitude) * metricBlend
-		// Heading wraps around 360, so take shortest path
-		hdgDiff := targetHdg - g.animHeading
-		if hdgDiff > 180 {
-			hdgDiff -= 360
-		} else if hdgDiff < -180 {
-			hdgDiff += 360
-		}
-		g.animHeading += hdgDiff * metricBlend
-		if g.animHeading < 0 {
-			g.animHeading += 360
-		} else if g.animHeading >= 360 {
-			g.animHeading -= 360
-		}
-
-		// Smoothly blend dead-reckoning heading toward target (shortest angular path)
-		drHdgDiff := g.drHeading - g.drHeadingSmooth
-		if drHdgDiff > 180 {
-			drHdgDiff -= 360
-		} else if drHdgDiff < -180 {
-			drHdgDiff += 360
-		}
-		g.drHeadingSmooth += drHdgDiff * 0.10 // smooth turn rate
-		if g.drHeadingSmooth < 0 {
-			g.drHeadingSmooth += 360
-		} else if g.drHeadingSmooth >= 360 {
-			g.drHeadingSmooth -= 360
-		}
-
-		// Dead-reckon: continuously project position forward from anchor
-		g.deadReckon()
-
-		// Capture trail point every 3rd tick (~10 pts/sec)
-		g.trailTick++
-		if g.trailTick%3 == 0 && g.interpLat != 0 {
-			g.trailPoints = append(g.trailPoints, [2]float64{g.interpLat, g.interpLon})
-			// Cap trail length to avoid memory growth
-			if len(g.trailPoints) > 2000 {
-				g.trailPoints = g.trailPoints[len(g.trailPoints)-1500:]
-			}
-		}
-
-		g.mapRender.Update(g.interpLat, g.interpLon)
+	// Track featured flight changes for trail management
+	featID := state.FeaturedIdent
+	if featID != g.lastFeaturedID {
+		// New featured flight — reset trail, start from SFO
+		g.trailPoints = [][2]float64{{sfoLat, sfoLon}}
+		g.lastFeaturedID = featID
 	}
+
+	// Record trail point for featured flight
+	if state.Featured != nil && state.Featured.Position != nil {
+		lat := state.Featured.Position.Latitude
+		lon := state.Featured.Position.Longitude
+		if lat != 0 && lon != 0 {
+			// Only add if position changed (avoid duplicates)
+			if len(g.trailPoints) == 0 ||
+				g.trailPoints[len(g.trailPoints)-1][0] != lat ||
+				g.trailPoints[len(g.trailPoints)-1][1] != lon {
+				g.trailPoints = append(g.trailPoints, [2]float64{lat, lon})
+				if len(g.trailPoints) > 500 {
+					g.trailPoints = g.trailPoints[len(g.trailPoints)-400:]
+				}
+			}
+		}
+	}
+
 	return nil
-}
-
-// deadReckon projects position forward from anchor using velocity.
-// Called every tick to produce smooth continuous motion between API polls.
-func (g *Game) deadReckon() {
-	if !g.hasAnchor || g.drSpeed <= 0 {
-		return
-	}
-
-	// Elapsed time since last confirmed position
-	dt := time.Since(g.anchorTime).Seconds()
-	if dt < 0 {
-		dt = 0
-	}
-	if dt > 30 {
-		dt = 30 // cap extrapolation
-	}
-
-	// Project from anchor: pos = anchor + velocity * dt
-	speedKmS := g.drSpeed * 1.852 / 3600.0            // knots → km/s
-	headingRad := g.drHeadingSmooth * math.Pi / 180.0 // use smoothed heading
-	dist := speedKmS * dt                             // total distance from anchor
-
-	earthRadius := 6371.0
-	dLat := (dist * math.Cos(headingRad)) / earthRadius * (180.0 / math.Pi)
-	dLon := (dist * math.Sin(headingRad)) / (earthRadius * math.Cos(g.anchorLat*math.Pi/180.0)) * (180.0 / math.Pi)
-
-	projLat := g.anchorLat + dLat
-	projLon := g.anchorLon + dLon
-
-	// Smooth blend toward projected position
-	blend := 0.15
-	g.interpLat += (projLat - g.interpLat) * blend
-	g.interpLon += (projLon - g.interpLon) * blend
 }
 
 // Draw renders the entire screen.
@@ -252,16 +133,20 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	state := g.tracker.GetState()
 
-	if state.Flight == nil {
+	if len(state.AllFlights) == 0 && state.Featured == nil {
 		g.drawWaiting(screen, state)
 		return
 	}
 
-	// Right side: Map (70%)
-	g.drawMap(screen, state)
+	// Right side: Radar Map
+	g.drawRadarMap(screen, state)
 
-	// Left side: Data panel (30%)
-	g.drawLeftPanel(screen, state)
+	// Left side: Featured flight panel
+	if state.Featured != nil {
+		g.drawLeftPanel(screen, state)
+	} else {
+		g.drawWaiting(screen, state)
+	}
 
 	// Divider line between panels
 	vector.DrawFilledRect(screen, leftPanelWidth-1, 0, 2, screenHeight, color.RGBA{0x25, 0x25, 0x25, 0xff}, false)
@@ -283,27 +168,71 @@ func (g *Game) drawWaiting(screen *ebiten.Image, state tracker.State) {
 		msg = "Connecting..."
 	}
 
+	// Draw in left panel area
+	vector.DrawFilledRect(screen, 0, 0, leftPanelWidth, screenHeight, color.RGBA{0x0a, 0x0a, 0x0a, 0xff}, false)
+
 	// Pulsing dot
-	vector.DrawFilledCircle(screen, screenWidth/2, screenHeight/2-20, 8, color.RGBA{0x00, 0xbb, 0xff, 0xff}, true)
+	vector.DrawFilledCircle(screen, leftPanelWidth/2, screenHeight/2-20, 8, color.RGBA{0x00, 0xbb, 0xff, 0xff}, true)
 
 	op := &text.DrawOptions{}
-	op.GeoM.Translate(screenWidth/2, screenHeight/2+20)
+	op.GeoM.Translate(leftPanelWidth/2, screenHeight/2+20)
 	op.ColorScale.ScaleWithColor(color.RGBA{0x88, 0x88, 0x88, 0xff})
 	op.PrimaryAlign = text.AlignCenter
 	text.Draw(screen, msg, g.fontFace, op)
 
 	op2 := &text.DrawOptions{}
-	op2.GeoM.Translate(screenWidth/2, screenHeight/2+45)
+	op2.GeoM.Translate(leftPanelWidth/2, screenHeight/2+45)
 	op2.ColorScale.ScaleWithColor(color.RGBA{0x44, 0x44, 0x44, 0xff})
 	op2.PrimaryAlign = text.AlignCenter
 	text.Draw(screen, "SFO Flight Tracker", g.fontFaceSm, op2)
 }
 
-// drawLeftPanel renders the 30% left data panel.
-func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
-	flight := state.Flight
+// drawRadarMap renders all flights on the fixed map.
+func (g *Game) drawRadarMap(screen *ebiten.Image, state tracker.State) {
+	var flights []FlightRenderData
 
-	// Panel background — very subtle dark gray
+	for _, fwp := range state.AllFlights {
+		if fwp.Flight == nil {
+			continue
+		}
+
+		rd := FlightRenderData{
+			Ident:      fwp.Flight.DisplayIdent(),
+			IsFeatured: fwp.Flight.Ident == state.FeaturedIdent || fwp.Flight.FlightID == state.FeaturedIdent,
+		}
+
+		if fwp.Position != nil {
+			rd.Lat = fwp.Position.Latitude
+			rd.Lon = fwp.Position.Longitude
+			rd.Heading = fwp.Position.Heading
+		}
+
+		flights = append(flights, rd)
+	}
+
+	g.mapRender.DrawRadar(screen, flights, g.trailPoints)
+
+	// SFO label
+	if g.fontFaceSm != nil {
+		sfoX, sfoY := g.mapRender.GetSFOScreenPos()
+		if sfoX >= mapX && sfoX <= screenWidth {
+			op := &text.DrawOptions{}
+			op.GeoM.Translate(float64(sfoX)+12, float64(sfoY)-6)
+			op.ColorScale.ScaleWithColor(color.RGBA{0x00, 0xdd, 0xff, 0xff})
+			text.Draw(screen, "SFO", g.fontFaceSm, op)
+		}
+	}
+}
+
+// drawLeftPanel renders the left data panel for the featured flight.
+func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
+	fwp := state.Featured
+	if fwp == nil || fwp.Flight == nil {
+		return
+	}
+	flight := fwp.Flight
+
+	// Panel background
 	vector.DrawFilledRect(screen, 0, 0, leftPanelWidth, screenHeight, color.RGBA{0x0a, 0x0a, 0x0a, 0xff}, false)
 
 	if g.fontFace == nil {
@@ -317,10 +246,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	logoCardH := float32(120)
 	logoCardR := float32(10)
 
-	// White rounded rectangle background
 	drawRoundedRect(screen, logoCardX, logoCardY, logoCardW, logoCardH, logoCardR, color.RGBA{0xf5, 0xf5, 0xf5, 0xff})
-
-	// Draw logo centered in card
 	g.drawAirlineLogo(screen, flight, logoCardX, logoCardY, logoCardW, logoCardH)
 
 	y := float64(logoCardY+logoCardH) + 12
@@ -338,16 +264,15 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	// ── Route with country flag ──
 	var routeText string
 	var flagAirport *provider.AirportRef
-	if state.Direction == provider.Arriving && flight.Origin != nil && flight.Origin.DisplayCity() != "Unknown" {
+	if flight.Origin != nil && flight.Origin.DisplayCity() != "Unknown" {
 		routeText = fmt.Sprintf("From %s", flight.Origin.DisplayCity())
 		flagAirport = flight.Origin
-	} else if state.Direction == provider.Departing && flight.Destination != nil && flight.Destination.DisplayCity() != "Unknown" {
+	} else if flight.Destination != nil && flight.Destination.DisplayCity() != "Unknown" {
 		routeText = fmt.Sprintf("To %s", flight.Destination.DisplayCity())
 		flagAirport = flight.Destination
 	}
 	if routeText != "" {
 		drawText(screen, routeText, 16, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
-		// Draw country flag next to route text
 		if flagAirport != nil {
 			g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
 		}
@@ -357,11 +282,9 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	// ── Aircraft type ──
 	if flight.AircraftType != "" {
 		acType := ""
-		// Try fleet lookup by IATA code first
 		if flight.OperatorIATA != "" {
 			acType = LookupAircraftType(flight.OperatorIATA, flight.AircraftType)
 		}
-		// Fallback: show raw ICAO type code (e.g. "B738", "A359")
 		if acType == "" {
 			acType = flight.AircraftType
 		}
@@ -373,14 +296,17 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
 	y += 12
 
-	// ── Metrics (animated scroll) ──
-	if state.Position != nil {
-		speedMph := int(math.Round(g.animSpeed))
-		altFeet := int(math.Round(g.animAltitude))
-		headingDeg := int(math.Round(g.animHeading)) % 360
+	// ── Metrics ──
+	if fwp.Position != nil {
+		pos := fwp.Position
+		speedMph := int(float64(pos.Groundspeed) * 1.15078)
+		altFeet := int(pos.Altitude) * 100
+		headingDeg := 0
+		if pos.Heading != nil {
+			headingDeg = *pos.Heading
+		}
 
-		// Check if data is still loading (all zeros)
-		loading := state.Position.Groundspeed == 0 && state.Position.Altitude == 0
+		loading := pos.Groundspeed == 0 && pos.Altitude == 0
 
 		labels := []string{"SPEED", "ALTITUDE", "HEADING"}
 		values := []string{
@@ -390,13 +316,11 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		}
 
 		for i, label := range labels {
-			// Label
 			drawText(screen, label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
 			y += 14
 
 			if loading {
-				// Skeleton placeholder bar
-				barW := float32(100 + i*30) // vary widths
+				barW := float32(100 + i*30)
 				drawRoundedRect(screen, 16, float32(y)+4, barW, 22, 4, color.RGBA{0x1a, 0x1a, 0x1a, 0xff})
 			} else {
 				drawText(screen, values[i], 16, y, g.fontFaceXl, color.White)
@@ -409,7 +333,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 			y += 4
 			altStatus := ""
 			var altClr color.RGBA
-			switch state.Position.AltitudeChange {
+			switch pos.AltitudeChange {
 			case "C":
 				altStatus = "▲ CLIMBING"
 				altClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
@@ -427,53 +351,13 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	}
 }
 
-// drawMap renders the right-side map.
-func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
-	var lat, lon float64
-	var heading *int
-	if state.Position != nil {
-		// Use interpolated position for smooth rendering
-		lat = g.interpLat
-		lon = g.interpLon
-		// Use smoothed heading for smooth icon rotation
-		smoothHdg := int(g.drHeadingSmooth)
-		heading = &smoothHdg
-	}
-
-	g.mapRender.Draw(screen, lat, lon, heading, g.trailPoints)
-
-	// SFO label
-	if g.fontFaceSm != nil {
-		sfoX, sfoY := g.mapRender.GetSFOScreenPos()
-		if sfoX >= mapX && sfoX <= screenWidth {
-			op := &text.DrawOptions{}
-			op.GeoM.Translate(float64(sfoX)+12, float64(sfoY)-6)
-			op.ColorScale.ScaleWithColor(color.RGBA{0x00, 0xdd, 0xff, 0xff})
-			text.Draw(screen, "SFO", g.fontFaceSm, op)
-		}
-	}
-
-	// Plane label — just show ident
-	if state.Position != nil && g.fontFaceSm != nil && state.Flight != nil {
-		px, py := g.mapRender.GetPlaneScreenPos(lat, lon)
-		if px >= mapX && px <= screenWidth {
-			op := &text.DrawOptions{}
-			op.GeoM.Translate(float64(px)+22, float64(py)-6)
-			op.ColorScale.ScaleWithColor(color.White)
-			text.Draw(screen, state.Flight.DisplayIdent(), g.fontFaceSm, op)
-		}
-	}
-}
-
 // resolveAirlineName returns the full airline name using the airlines.json dataset.
 func (g *Game) resolveAirlineName(flight *provider.Flight) string {
-	// Best: lookup by IATA code
 	if flight.OperatorIATA != "" {
 		if a, ok := LookupAirlineByIATA(flight.OperatorIATA); ok {
 			return a.Name
 		}
 	}
-	// Fallback: lookup by operator name
 	if flight.Operator != "" {
 		if a, ok := LookupAirlineByName(flight.Operator); ok {
 			return a.Name
@@ -501,7 +385,6 @@ func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, ca
 			}
 			scaledW := float64(bounds.Dx()) * scale
 			scaledH := float64(bounds.Dy()) * scale
-			// Center in card
 			offX := float64(cardX) + (float64(cardW)-scaledW)/2
 			offY := float64(cardY) + (float64(cardH)-scaledH)/2
 			op.GeoM.Scale(scale, scale)
@@ -513,7 +396,6 @@ func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, ca
 
 	go g.fetchAirlineLogo(code, flight)
 
-	// Fallback: show airline code centered in card
 	if g.fontFaceLg != nil {
 		displayCode := code
 		if len(displayCode) > 4 {
@@ -529,13 +411,9 @@ func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, ca
 
 // drawRoundedRect draws a filled rounded rectangle.
 func drawRoundedRect(screen *ebiten.Image, x, y, w, h, r float32, clr color.Color) {
-	// Center fill
 	vector.DrawFilledRect(screen, x+r, y, w-2*r, h, clr, true)
-	// Left fill
 	vector.DrawFilledRect(screen, x, y+r, r, h-2*r, clr, true)
-	// Right fill
 	vector.DrawFilledRect(screen, x+w-r, y+r, r, h-2*r, clr, true)
-	// Four corners
 	vector.DrawFilledCircle(screen, x+r, y+r, r, clr, true)
 	vector.DrawFilledCircle(screen, x+w-r, y+r, r, clr, true)
 	vector.DrawFilledCircle(screen, x+r, y+h-r, r, clr, true)
@@ -555,7 +433,6 @@ func (g *Game) fetchAirlineLogo(code string, flight *provider.Flight) {
 		iataCode = strings.ToLower(code)
 	}
 
-	// Fetch clean airline logos from external services
 	urls := []string{
 		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_350_350_s.png", iataCode),
 		fmt.Sprintf("https://pics.avs.io/350/350/%s.png", strings.ToUpper(iataCode)),
@@ -594,8 +471,6 @@ func tryFetchImage(imgURL string) image.Image {
 	return img
 }
 
-// drawText is a helper to draw text at a given position.
-// formatAltFeet formats altitude in feet with comma separator for large values.
 func formatAltFeet(feet int) string {
 	if feet >= 10000 {
 		return fmt.Sprintf("%d,%03d ft", feet/1000, feet%1000)
@@ -603,7 +478,6 @@ func formatAltFeet(feet int) string {
 	return fmt.Sprintf("%d ft", feet)
 }
 
-// formatHeadingDeg formats heading in degrees with compass direction.
 func formatHeadingDeg(deg int) string {
 	directions := []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
 	idx := ((deg + 22) / 45) % 8
@@ -620,7 +494,6 @@ func drawText(screen *ebiten.Image, s string, x, y float64, face *text.GoTextFac
 	text.Draw(screen, s, face, op)
 }
 
-// textWidth measures the pixel width of a string with the given font face.
 func textWidth(s string, face *text.GoTextFace) float64 {
 	if face == nil {
 		return 0
@@ -641,7 +514,6 @@ func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *provider.AirportRe
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
 			op := &ebiten.DrawImageOptions{}
 			bounds := img.Bounds()
-			// Scale to 22x16
 			scaleX := 22.0 / float64(bounds.Dx())
 			scaleY := 16.0 / float64(bounds.Dy())
 			op.GeoM.Scale(scaleX, scaleY)
@@ -651,7 +523,6 @@ func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *provider.AirportRe
 		return
 	}
 
-	// Fetch async
 	go func() {
 		if _, loaded := g.logoCache.LoadOrStore(cacheKey, (*ebiten.Image)(nil)); loaded {
 			return
@@ -680,11 +551,9 @@ func icaoToCountryCode(airport *provider.AirportRef) string {
 	prefix2 := code[:2]
 	prefix1 := code[:1]
 
-	// 2-letter prefix matches (more specific)
 	if cc, ok := icaoPrefixToCountry[prefix2]; ok {
 		return cc
 	}
-	// 1-letter prefix matches
 	if cc, ok := icaoPrefixToCountry[prefix1]; ok {
 		return cc
 	}

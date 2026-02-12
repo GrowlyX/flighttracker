@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	_ "image/jpeg"
@@ -26,6 +27,8 @@ const (
 	maxZoom    = 18
 	minZoom    = 2
 	tileMaxAge = 500 // max cached tiles
+
+	radarZoom = 10.0 // fixed zoom for ~50nm view
 )
 
 // TileKey uniquely identifies a map tile.
@@ -33,16 +36,21 @@ type TileKey struct {
 	Z, X, Y int
 }
 
-// MapRenderer draws an OpenStreetMap tile-based map with flight position.
+// FlightRenderData holds what the map needs to draw one flight.
+type FlightRenderData struct {
+	Lat, Lon   float64
+	Heading    *int
+	Ident      string
+	IsFeatured bool
+}
+
+// MapRenderer draws an OpenStreetMap tile-based map with flight positions.
 type MapRenderer struct {
 	// Screen region for the map
 	x, y, w, h float32
 
-	// Map state
-	centerLat, centerLon             float64
-	targetCenterLat, targetCenterLon float64
-	zoom                             float64
-	targetZoom                       float64
+	// Fixed map state — SFO-centered, constant zoom
+	zoom float64
 
 	// Tile cache
 	tileCache sync.Map // map[TileKey]*ebiten.Image
@@ -51,21 +59,26 @@ type MapRenderer struct {
 
 	// Plane icon
 	planeImg *ebiten.Image
+
+	// Label font (set externally)
+	labelFont *text.GoTextFace
 }
 
 // NewMapRenderer creates a map renderer for the given screen region.
 func NewMapRenderer(x, y, w, h float32) *MapRenderer {
 	return &MapRenderer{
-		x:          x,
-		y:          y,
-		w:          w,
-		h:          h,
-		centerLat:  sfoLat,
-		centerLon:  sfoLon,
-		zoom:       12,
-		targetZoom: 12,
-		fetchSem:   make(chan struct{}, 4), // max 4 concurrent tile fetches
+		x:        x,
+		y:        y,
+		w:        w,
+		h:        h,
+		zoom:     radarZoom,
+		fetchSem: make(chan struct{}, 4), // max 4 concurrent tile fetches
 	}
+}
+
+// SetLabelFont sets the font used for callsign labels on the map.
+func (m *MapRenderer) SetLabelFont(f *text.GoTextFace) {
+	m.labelFont = f
 }
 
 // latLonToTileXY converts lat/lon to tile coordinates at a given zoom level.
@@ -86,65 +99,11 @@ func tileXYToLatLon(x, y float64, zoom int) (float64, float64) {
 	return lat, lon
 }
 
-// ResetCenter snaps the map center back to SFO for smooth pan-out on flight change.
-func (m *MapRenderer) ResetCenter() {
-	m.centerLat = sfoLat
-	m.centerLon = sfoLon
-	m.targetCenterLat = sfoLat
-	m.targetCenterLon = sfoLon
-}
-
-// Update recalculates the map viewport to fit both SFO and the plane.
-func (m *MapRenderer) Update(planeLat, planeLon float64) {
-	if planeLat == 0 && planeLon == 0 {
-		m.targetCenterLat = sfoLat
-		m.targetCenterLon = sfoLon
-		m.targetZoom = 12
-	} else {
-		// Center between SFO and plane
-		m.targetCenterLat = (sfoLat + planeLat) / 2
-		m.targetCenterLon = (sfoLon + planeLon) / 2
-
-		// Continuous zoom formula
-		latDiff := math.Abs(sfoLat - planeLat)
-		lonDiff := math.Abs(sfoLon - planeLon)
-		maxDiff := math.Max(latDiff, lonDiff)
-
-		// Add 40% padding so both SFO and plane are well within frame
-		maxDiff *= 1.4
-
-		if maxDiff < 0.03 {
-			maxDiff = 0.03 // floor to prevent extreme zoom-in
-		}
-
-		// zoom ≈ 8.5 - 3.0 * log2(maxDiff)
-		newZoom := 8.5 - 3.0*math.Log2(maxDiff)
-		newZoom = math.Max(3, math.Min(11, newZoom)) // cap at 11
-
-		m.targetZoom = newZoom
-	}
-
-	// Smooth center panning (responsive enough to track fast departures)
-	centerBlend := 0.12
-	m.centerLat += (m.targetCenterLat - m.centerLat) * centerBlend
-	m.centerLon += (m.targetCenterLon - m.centerLon) * centerBlend
-
-	// Rate-limited smooth zoom transition
-	diff := m.targetZoom - m.zoom
-	maxStep := 0.12
-	if diff > maxStep {
-		diff = maxStep
-	} else if diff < -maxStep {
-		diff = -maxStep
-	}
-	m.zoom += diff
-}
-
 // latLonToScreen converts geographic coordinates to screen pixel coordinates.
 func (m *MapRenderer) latLonToScreen(lat, lon float64) (float32, float32) {
 	z := int(math.Round(m.zoom))
-	// Center tile coordinates
-	cx, cy := latLonToTileXY(m.centerLat, m.centerLon, z)
+	// Center tile coordinates (SFO)
+	cx, cy := latLonToTileXY(sfoLat, sfoLon, z)
 	// Point tile coordinates
 	px, py := latLonToTileXY(lat, lon, z)
 
@@ -158,15 +117,20 @@ func (m *MapRenderer) latLonToScreen(lat, lon float64) (float32, float32) {
 	return sx, sy
 }
 
-// Draw renders the tile map onto the screen.
-func (m *MapRenderer) Draw(screen *ebiten.Image, planeLat, planeLon float64, heading *int, trail [][2]float64) {
+// IsOnScreen returns true if the given screen coordinates are within the visible map area.
+func (m *MapRenderer) IsOnScreen(sx, sy float32) bool {
+	return sx >= m.x && sx <= m.x+m.w && sy >= m.y && sy <= m.y+m.h
+}
+
+// DrawRadar renders the fixed map with all flights.
+func (m *MapRenderer) DrawRadar(screen *ebiten.Image, flights []FlightRenderData, featuredTrail [][2]float64) {
 	// Black background for the map area
 	vector.DrawFilledRect(screen, m.x, m.y, m.w, m.h, color.Black, false)
 
 	z := int(math.Round(m.zoom))
 
-	// Calculate which tiles we need
-	cx, cy := latLonToTileXY(m.centerLat, m.centerLon, z)
+	// Calculate which tiles we need — centered on SFO
+	cx, cy := latLonToTileXY(sfoLat, sfoLon, z)
 
 	// How many tiles fit on screen
 	tilesW := int(math.Ceil(float64(m.w)/tileSize)) + 2
@@ -215,25 +179,40 @@ func (m *MapRenderer) Draw(screen *ebiten.Image, planeLat, planeLon float64, hea
 	}
 
 	// Clip: draw black borders outside the map area
-	// Top
 	if m.y > 0 {
 		vector.DrawFilledRect(screen, m.x, 0, m.w, m.y, color.Black, false)
 	}
 
-	// Draw trail from recorded positions (replaces straight line)
-	if len(trail) > 1 {
-		m.drawTrail(screen, trail)
-	} else if planeLat != 0 || planeLon != 0 {
-		// Fallback: straight line if no trail yet
-		m.drawRouteLine(screen, planeLat, planeLon)
+	// Draw featured trail
+	if len(featuredTrail) > 1 {
+		m.drawTrail(screen, featuredTrail)
 	}
 
 	// Draw SFO marker
 	m.drawAirportMarker(screen, sfoLat, sfoLon)
 
-	// Draw plane
-	if planeLat != 0 || planeLon != 0 {
-		m.drawPlane(screen, planeLat, planeLon, heading)
+	// Draw all flights
+	for _, f := range flights {
+		if f.Lat == 0 && f.Lon == 0 {
+			continue
+		}
+		sx, sy := m.latLonToScreen(f.Lat, f.Lon)
+		if !m.IsOnScreen(sx, sy) {
+			continue
+		}
+		if f.IsFeatured {
+			m.drawPlane(screen, f.Lat, f.Lon, f.Heading, 36.0, 1.0)
+		} else {
+			m.drawPlane(screen, f.Lat, f.Lon, f.Heading, 24.0, 0.5)
+		}
+		// Draw callsign label
+		if m.labelFont != nil && f.Ident != "" {
+			labelClr := color.RGBA{0xcc, 0xcc, 0xcc, 0xaa}
+			if f.IsFeatured {
+				labelClr = color.RGBA{0x00, 0xdd, 0xff, 0xff}
+			}
+			drawText(screen, f.Ident, float64(sx)+20, float64(sy)-8, m.labelFont, labelClr)
+		}
 	}
 }
 
@@ -291,7 +270,7 @@ func (m *MapRenderer) fetchTile(key TileKey) {
 	m.tileCache.Store(key, ebiImg)
 }
 
-// drawTrail draws the actual recorded flight path as a polyline with fading tail.
+// drawTrail draws the flight path as a polyline with fading tail.
 func (m *MapRenderer) drawTrail(screen *ebiten.Image, trail [][2]float64) {
 	n := len(trail)
 	if n < 2 {
@@ -319,67 +298,6 @@ func (m *MapRenderer) drawTrail(screen *ebiten.Image, trail [][2]float64) {
 	}
 }
 
-// drawRouteLine draws a great circle arc from SFO to the plane.
-func (m *MapRenderer) drawRouteLine(screen *ebiten.Image, lat, lon float64) {
-	// Generate points along the great circle path using SLERP.
-	const numSegments = 64
-	points := greatCirclePoints(sfoLat, sfoLon, lat, lon, numSegments)
-
-	routeColor := color.RGBA{0x00, 0xbb, 0xff, 0x90}
-
-	for i := 0; i < len(points)-1; i++ {
-		x1, y1 := m.latLonToScreen(points[i][0], points[i][1])
-		x2, y2 := m.latLonToScreen(points[i+1][0], points[i+1][1])
-
-		// Skip segments that wrap around the screen (antimeridian crossing artifact)
-		if math.Abs(float64(x2-x1)) > float64(m.w)/2 {
-			continue
-		}
-
-		vector.StrokeLine(screen, x1, y1, x2, y2, 2.5, routeColor, true)
-	}
-}
-
-// greatCirclePoints computes intermediate lat/lon points along a great circle arc
-// using spherical linear interpolation (SLERP).
-func greatCirclePoints(lat1, lon1, lat2, lon2 float64, n int) [][2]float64 {
-	φ1 := lat1 * math.Pi / 180
-	λ1 := lon1 * math.Pi / 180
-	φ2 := lat2 * math.Pi / 180
-	λ2 := lon2 * math.Pi / 180
-
-	// Central angle using the Vincenty formula (more stable for small/large angles)
-	dλ := λ2 - λ1
-	Δσ := math.Atan2(
-		math.Sqrt(math.Pow(math.Cos(φ2)*math.Sin(dλ), 2)+
-			math.Pow(math.Cos(φ1)*math.Sin(φ2)-math.Sin(φ1)*math.Cos(φ2)*math.Cos(dλ), 2)),
-		math.Sin(φ1)*math.Sin(φ2)+math.Cos(φ1)*math.Cos(φ2)*math.Cos(dλ),
-	)
-
-	if Δσ < 1e-10 {
-		// Points are essentially the same location
-		return [][2]float64{{lat1, lon1}, {lat2, lon2}}
-	}
-
-	points := make([][2]float64, n+1)
-	for i := 0; i <= n; i++ {
-		f := float64(i) / float64(n)
-
-		a := math.Sin((1-f)*Δσ) / math.Sin(Δσ)
-		b := math.Sin(f*Δσ) / math.Sin(Δσ)
-
-		x := a*math.Cos(φ1)*math.Cos(λ1) + b*math.Cos(φ2)*math.Cos(λ2)
-		y := a*math.Cos(φ1)*math.Sin(λ1) + b*math.Cos(φ2)*math.Sin(λ2)
-		z := a*math.Sin(φ1) + b*math.Sin(φ2)
-
-		φ := math.Atan2(z, math.Sqrt(x*x+y*y))
-		λ := math.Atan2(y, x)
-
-		points[i] = [2]float64{φ * 180 / math.Pi, λ * 180 / math.Pi}
-	}
-	return points
-}
-
 // drawAirportMarker draws SFO dot.
 func (m *MapRenderer) drawAirportMarker(screen *ebiten.Image, lat, lon float64) {
 	x, y := m.latLonToScreen(lat, lon)
@@ -392,8 +310,9 @@ func (m *MapRenderer) drawAirportMarker(screen *ebiten.Image, lat, lon float64) 
 	vector.DrawFilledCircle(screen, x, y, 3, color.RGBA{0x00, 0xdd, 0xff, 0xff}, true)
 }
 
-// drawPlane draws the aircraft icon at the given position using the airplane PNG.
-func (m *MapRenderer) drawPlane(screen *ebiten.Image, lat, lon float64, heading *int) {
+// drawPlane draws the aircraft icon at the given position.
+// size controls the target pixel size, opacity controls transparency (0..1).
+func (m *MapRenderer) drawPlane(screen *ebiten.Image, lat, lon float64, heading *int, size, opacity float64) {
 	if m.planeImg == nil {
 		return
 	}
@@ -410,9 +329,7 @@ func (m *MapRenderer) drawPlane(screen *ebiten.Image, lat, lon float64, heading 
 	imgW := float64(bounds.Dx())
 	imgH := float64(bounds.Dy())
 
-	// Scale to ~36px on screen
-	targetSize := 36.0
-	scale := targetSize / math.Max(imgW, imgH)
+	scale := size / math.Max(imgW, imgH)
 
 	op := &ebiten.DrawImageOptions{}
 
@@ -421,6 +338,9 @@ func (m *MapRenderer) drawPlane(screen *ebiten.Image, lat, lon float64, heading 
 	op.GeoM.Scale(scale, scale)
 	op.GeoM.Rotate(angle)
 	op.GeoM.Translate(float64(x), float64(y))
+
+	// Apply opacity
+	op.ColorScale.Scale(float32(opacity), float32(opacity), float32(opacity), float32(opacity))
 
 	screen.DrawImage(m.planeImg, op)
 }
@@ -438,11 +358,6 @@ func (m *MapRenderer) LoadPlaneIcon(pngData []byte) error {
 // GetSFOScreenPos returns the screen position of SFO (for label rendering).
 func (m *MapRenderer) GetSFOScreenPos() (float32, float32) {
 	return m.latLonToScreen(sfoLat, sfoLon)
-}
-
-// GetPlaneScreenPos returns the screen position of the plane.
-func (m *MapRenderer) GetPlaneScreenPos(lat, lon float64) (float32, float32) {
-	return m.latLonToScreen(lat, lon)
 }
 
 // FormatSpeed returns a formatted speed string.

@@ -6,7 +6,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
@@ -14,30 +13,37 @@ import (
 )
 
 const (
-	airportCode            = "KSFO"
-	positionPollInterval   = 8 * time.Second // longer interval since dead reckoning fills gaps
-	flightListPollInterval = 5 * time.Second
+	airportCode  = "KSFO"
+	pollInterval = 8 * time.Second // how often we refresh the flight list + featured position
+	maxDistNM    = 50.0            // radar radius in nautical miles
 )
 
-// State holds a snapshot of the currently tracked flight for the UI to read.
-type State struct {
-	Flight    *provider.Flight
-	Position  *provider.FlightPosition
-	Direction provider.FlightDirection
-	Error     string
-	UpdatedAt time.Time
+// FlightWithPos bundles a flight with its latest known position.
+type FlightWithPos struct {
+	Flight   *provider.Flight
+	Position *provider.FlightPosition
 }
 
-// Tracker manages the flight tracking state machine.
+// State holds the radar snapshot for the UI.
+type State struct {
+	AllFlights    []FlightWithPos // every flight in the radar zone
+	Featured      *FlightWithPos  // the one shown in the sidebar
+	FeaturedIdent string          // ident of the featured flight (for identity)
+	Error         string
+	UpdatedAt     time.Time
+}
+
+// Tracker manages the radar-style flight tracking.
 type Tracker struct {
 	prov provider.FlightProvider
 
 	mu    sync.RWMutex
 	state State
 
-	// Current tracking context
-	currentFlightID string
-	direction       provider.FlightDirection
+	// Featured flight management
+	featuredIdent string // ident we're sticking with
+	staleCount    int    // consecutive polls where featured was stationary
+	direction     provider.FlightDirection
 
 	// AirlineFilter is an optional callback that returns true if the airline
 	// code/name is known. Flights failing this check are skipped.
@@ -66,132 +72,158 @@ func (t *Tracker) setState(s State) {
 	t.state = s
 }
 
-func (t *Tracker) setError(err error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.state.Error = err.Error()
-	t.state.UpdatedAt = time.Now()
-}
-
-// Run starts the tracking loop. It blocks forever — run in a goroutine.
+// Run starts the radar loop. Blocks forever — run in a goroutine.
 func (t *Tracker) Run() {
 	for {
-		t.runCycle()
+		t.radarTick()
+		time.Sleep(pollInterval)
 	}
 }
 
-// runCycle performs one full arrive→depart cycle.
-func (t *Tracker) runCycle() {
-	// Track a departing flight
-	t.direction = provider.Departing
-	t.trackNextFlight()
-
-	// Track an arriving flight
-	t.direction = provider.Arriving
-	t.trackNextFlight()
-}
-
-// trackNextFlight finds a suitable en-route flight and tracks it until completion.
-func (t *Tracker) trackNextFlight() {
-	for {
-		flight := t.findEnRouteFlight()
-		if flight == nil {
-			log.Printf("[tracker] no en-route %s flights found, retrying in %v", t.direction, flightListPollInterval)
-			time.Sleep(flightListPollInterval)
-			continue
-		}
-
-		log.Printf("[tracker] tracking %s flight %s (%s)", t.direction, flight.DisplayIdent(), flight.FlightID)
-		t.currentFlightID = flight.FlightID
-
-		// Backfill aircraft type if missing (e.g. OpenSky doesn't provide it)
-		if flight.AircraftType == "" && flight.FlightID != "" {
-			go t.backfillAircraftType(flight)
-		}
-
-		// Set initial state with flight info
-		t.setState(State{
-			Flight:    flight,
-			Direction: t.direction,
-		})
-
-		// Poll position until the flight completes
-		completed := t.pollUntilComplete(flight)
-		if completed {
-			log.Printf("[tracker] flight %s completed, switching", flight.DisplayIdent())
-			time.Sleep(3 * time.Second)
-			return
-		}
+// radarTick performs one refresh cycle:
+// 1. Fetch all nearby flights (alternating departures/arrivals)
+// 2. Filter to known airlines within radar range
+// 3. Poll position for the featured flight
+// 4. Manage featured flight selection
+func (t *Tracker) radarTick() {
+	// Alternate direction each tick to get both arrivals and departures
+	if t.direction == provider.Departing {
+		t.direction = provider.Arriving
+	} else {
+		t.direction = provider.Departing
 	}
-}
 
-// SFO coordinates for distance filtering.
-const (
-	sfoLat = 37.6213
-	sfoLon = -122.3790
-	// maxDistanceNM is the maximum distance from SFO to consider a flight.
-	// ~50 nautical miles keeps flights visually close on the map.
-	maxDistanceNM = 50.0
-)
-
-// findEnRouteFlight searches for an active in-flight aircraft, preferring
-// airline flights close to SFO.
-func (t *Tracker) findEnRouteFlight() *provider.Flight {
 	flights, err := t.prov.GetFlightsNear(airportCode, t.direction)
 	if err != nil {
 		log.Printf("[tracker] error fetching flights: %v", err)
-		t.setError(err)
-		return nil
+		return
 	}
 
-	// Score and filter flights by distance and airline status
-	type scored struct {
-		flight  *provider.Flight
-		dist    float64
-		airline bool
+	// Also fetch the other direction
+	otherDir := provider.Departing
+	if t.direction == provider.Departing {
+		otherDir = provider.Arriving
 	}
-	var candidates []scored
+	otherFlights, err2 := t.prov.GetFlightsNear(airportCode, otherDir)
+	if err2 == nil {
+		flights = append(flights, otherFlights...)
+	}
+
+	// Deduplicate by ident
+	seen := make(map[string]bool)
+	var deduped []provider.Flight
+	for _, f := range flights {
+		key := f.Ident
+		if key == "" {
+			key = f.FlightID
+		}
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, f)
+	}
+	flights = deduped
+
+	log.Printf("[tracker] radar: %d flights nearby", len(flights))
+
+	// Filter and build FlightWithPos list
+	var allFlights []FlightWithPos
+	var featuredFWP *FlightWithPos
 
 	for i := range flights {
 		f := &flights[i]
+
+		// Must be airborne with an ident
 		if !f.IsAirborne || f.Ident == "" {
 			continue
 		}
 
-		// Skip flights from unknown/unresolvable airlines (cargo, private, etc.)
+		// Filter to known airlines only
 		if t.AirlineFilter != nil {
 			if !t.AirlineFilter(f.OperatorIATA, f.Operator) {
 				continue
 			}
 		}
 
-		// Skip flights without a position (we can't compute distance)
-		// For AeroAPI flights, we don't have lat/lon at discovery time,
-		// so we allow them through with dist=0.
-		candidates = append(candidates, scored{
-			flight:  f,
-			dist:    0, // distance computed below if position available
-			airline: isAirline(f),
-		})
-	}
+		fwp := FlightWithPos{Flight: f}
 
-	// Sort: airline flights first, then by distance (nearest first)
-	sort.Slice(candidates, func(a, b int) bool {
-		if candidates[a].airline != candidates[b].airline {
-			return candidates[a].airline
+		// If this is the featured flight, poll its position
+		if f.Ident == t.featuredIdent || f.FlightID == t.featuredIdent {
+			pos, err := t.prov.GetFlightPosition(f)
+			if err == nil && pos != nil {
+				fwp.Position = pos
+
+				// Check if stationary (groundspeed == 0)
+				if pos.Groundspeed == 0 {
+					t.staleCount++
+				} else {
+					t.staleCount = 0
+				}
+
+				// Check if out of radar range
+				if pos.Latitude != 0 && pos.Longitude != 0 {
+					dist := haversineNM(sfoLat, sfoLon, pos.Latitude, pos.Longitude)
+					if dist > maxDistNM {
+						log.Printf("[tracker] featured %s left radar (%.0fnm), switching", f.DisplayIdent(), dist)
+						t.featuredIdent = ""
+						t.staleCount = 0
+					}
+				}
+			}
+			if t.featuredIdent != "" {
+				featuredFWP = &fwp
+			}
 		}
-		return candidates[a].dist < candidates[b].dist
-	})
 
-	if len(candidates) > 0 {
-		return candidates[0].flight
+		allFlights = append(allFlights, fwp)
 	}
-	return nil
+
+	// If featured is stale for >2 polls, drop it
+	if t.staleCount > 2 {
+		log.Printf("[tracker] featured %s stationary for %d polls, switching", t.featuredIdent, t.staleCount)
+		t.featuredIdent = ""
+		t.staleCount = 0
+		featuredFWP = nil
+	}
+
+	// If no featured, pick a new one (any moving airline flight)
+	if t.featuredIdent == "" && len(allFlights) > 0 {
+		for i := range allFlights {
+			f := allFlights[i].Flight
+			t.featuredIdent = f.Ident
+			if t.featuredIdent == "" {
+				t.featuredIdent = f.FlightID
+			}
+			log.Printf("[tracker] featured → %s", f.DisplayIdent())
+
+			// Backfill aircraft type if missing
+			if f.AircraftType == "" && f.FlightID != "" {
+				go t.backfillAircraftType(f)
+			}
+
+			// Poll position for the newly featured flight
+			pos, err := t.prov.GetFlightPosition(f)
+			if err == nil && pos != nil {
+				allFlights[i].Position = pos
+			}
+			featuredFWP = &allFlights[i]
+			break
+		}
+	}
+
+	t.setState(State{
+		AllFlights:    allFlights,
+		Featured:      featuredFWP,
+		FeaturedIdent: t.featuredIdent,
+	})
 }
 
-func isAirline(f *provider.Flight) bool {
-	return f.OperatorIATA != "" || f.OperatorICAO != "" || f.Operator != ""
-}
+// SFO coordinates for distance filtering.
+const (
+	sfoLat = 37.6213
+	sfoLon = -122.3790
+)
 
 // haversineNM computes distance between two lat/lon points in nautical miles.
 func haversineNM(lat1, lon1, lat2, lon2 float64) float64 {
@@ -205,69 +237,6 @@ func haversineNM(lat1, lon1, lat2, lon2 float64) float64 {
 	return earthRadiusNM * c
 }
 
-// pollUntilComplete polls the flight position until it lands/departs.
-func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
-	ticker := time.NewTicker(positionPollInterval)
-	defer ticker.Stop()
-
-	consecutiveErrors := 0
-	const maxErrors = 30
-	// Disqualify flights that move beyond this distance from SFO
-	const maxPollDistanceNM = 100.0
-
-	for range ticker.C {
-		pos, err := t.prov.GetFlightPosition(flight)
-		if err != nil {
-			consecutiveErrors++
-			log.Printf("[tracker] position error (%d/%d): %v", consecutiveErrors, maxErrors, err)
-			t.setError(err)
-			if consecutiveErrors >= maxErrors {
-				return false
-			}
-			continue
-		}
-		consecutiveErrors = 0
-
-		// Disqualify if flight has moved too far from SFO
-		if pos.Latitude != 0 && pos.Longitude != 0 {
-			dist := haversineNM(sfoLat, sfoLon, pos.Latitude, pos.Longitude)
-			if dist > maxPollDistanceNM {
-				log.Printf("[tracker] flight %s is %.0fnm from SFO (max %0.fnm), disqualifying",
-					flight.DisplayIdent(), dist, maxPollDistanceNM)
-				return true // treat as completed so we move on
-			}
-		}
-
-		// For departures, track until they're well airborne (altitude > 100 = 10,000ft)
-		if t.direction == provider.Departing && pos.Altitude > 100 {
-			t.setState(State{
-				Flight:    flight,
-				Position:  pos,
-				Direction: t.direction,
-			})
-			return true
-		}
-
-		// For arrivals, track until altitude drops to 0 or very low
-		if t.direction == provider.Arriving && pos.Altitude <= 0 {
-			t.setState(State{
-				Flight:    flight,
-				Position:  pos,
-				Direction: t.direction,
-			})
-			return true
-		}
-
-		// Update the current position
-		t.setState(State{
-			Flight:    flight,
-			Position:  pos,
-			Direction: t.direction,
-		})
-	}
-	return false
-}
-
 // hexdbResponse represents the hexdb.io aircraft lookup response.
 type hexdbResponse struct {
 	ICAOTypeCode     string `json:"ICAOTypeCode"` // e.g. "A359", "B738"
@@ -276,7 +245,7 @@ type hexdbResponse struct {
 }
 
 // backfillAircraftType looks up the aircraft type from the ICAO24 hex code
-// using the free hexdb.io API and updates the flight + state.
+// using the free hexdb.io API and updates the flight.
 func (t *Tracker) backfillAircraftType(flight *provider.Flight) {
 	icao24 := flight.FlightID
 	if len(icao24) != 6 {
@@ -310,17 +279,4 @@ func (t *Tracker) backfillAircraftType(flight *provider.Flight) {
 
 	log.Printf("[tracker] backfilled aircraft type for %s: %s", flight.DisplayIdent(), result.ICAOTypeCode)
 	flight.AircraftType = result.ICAOTypeCode
-
-	// Re-publish state so UI picks up the new type
-	t.mu.RLock()
-	currentState := t.state
-	t.mu.RUnlock()
-
-	if currentState.Flight != nil && currentState.Flight.FlightID == flight.FlightID {
-		t.setState(State{
-			Flight:    flight,
-			Position:  currentState.Position,
-			Direction: currentState.Direction,
-		})
-	}
 }
