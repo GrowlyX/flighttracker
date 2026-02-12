@@ -186,18 +186,13 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 
 	// ── Airline Name ──
 	airlineName := g.resolveAirlineName(flight)
-	drawText(screen, airlineName, 16, y, g.fontFaceLg, color.White)
-	y += 30
+	drawText(screen, airlineName, 16, y, g.fontFaceXl, color.White)
+	y += 36
 
 	// ── Flight Code ──
 	flightCode := flight.DisplayIdent()
-	drawText(screen, flightCode, 16, y, g.fontFace, color.RGBA{0x00, 0xbb, 0xff, 0xff})
-	y += 24
-
-	// ── Direction badge ──
-	dirLabel := state.Direction.String()
-	drawText(screen, dirLabel, 16, y, g.fontFaceSm, color.RGBA{0x66, 0x66, 0x66, 0xff})
-	y += 22
+	drawText(screen, flightCode, 16, y, g.fontFaceLg, color.RGBA{0x00, 0xbb, 0xff, 0xff})
+	y += 32
 
 	// ── Route with country flag ──
 	var routeText string
@@ -215,38 +210,11 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	if flagAirport != nil {
 		g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
 	}
-	y += 30
-
-	// ── Status ──
-	status := flight.Status
-	if status == "" {
-		status = "En Route"
-	}
-	statusColor := color.RGBA{0x00, 0xcc, 0x66, 0xff}
-	drawText(screen, status, 16, y, g.fontFaceSm, statusColor)
-	y += 20
-
-	// ── Progress ──
-	if flight.ProgressPercent != nil {
-		pct := *flight.ProgressPercent
-		// Percentage label above the bar
-		drawText(screen, fmt.Sprintf("%d%% complete", pct), 16, y, g.fontFaceSm, color.RGBA{0x88, 0x88, 0x88, 0xff})
-		y += 16
-		// Progress bar
-		barW := float32(leftPanelWidth - 32)
-		barH := float32(3)
-		barX := float32(16)
-		barY := float32(y)
-		vector.DrawFilledRect(screen, barX, barY, barW, barH, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
-		fillW := barW * float32(pct) / 100
-		vector.DrawFilledRect(screen, barX, barY, fillW, barH, color.White, false)
-		y += 12
-	}
+	y += 32
 
 	// ── Separator ──
-	y += 8
 	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
-	y += 16
+	y += 20
 
 	// ── Metrics ──
 	if state.Position != nil {
@@ -255,49 +223,38 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		metrics := []struct {
 			label string
 			value string
-			unit  string
 		}{
-			{"SPEED", fmt.Sprintf("%d", int(float64(pos.Groundspeed)*1.15078)), "mph"},
-			{"ALTITUDE", FormatAltitude(pos.Altitude), ""},
-			{"HEADING", FormatHeading(pos.Heading), ""},
-		}
-
-		// Altitude change status
-		altStatus := ""
-		switch pos.AltitudeChange {
-		case "C":
-			altStatus = "▲ CLIMBING"
-		case "D":
-			altStatus = "▼ DESCENDING"
-		case "-":
-			altStatus = "━ LEVEL"
+			{"SPEED", fmt.Sprintf("%d mph", int(float64(pos.Groundspeed)*1.15078))},
+			{"ALTITUDE", FormatAltitude(pos.Altitude)},
+			{"HEADING", FormatHeading(pos.Heading)},
 		}
 
 		for _, m := range metrics {
 			// Label
 			drawText(screen, m.label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
-			y += 16
-
+			y += 18
 			// Value
-			valueStr := m.value
-			if m.unit != "" {
-				valueStr = m.value + " " + m.unit
-			}
-			drawText(screen, valueStr, 16, y, g.fontFaceLg, color.White)
-			y += 32
+			drawText(screen, m.value, 16, y, g.fontFaceXl, color.White)
+			y += 38
 		}
+	}
 
-		if altStatus != "" {
-			drawText(screen, "STATUS", 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
-			y += 16
-			statusClr := color.RGBA{0xcc, 0xcc, 0xcc, 0xff}
-			if pos.AltitudeChange == "C" {
-				statusClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
-			} else if pos.AltitudeChange == "D" {
-				statusClr = color.RGBA{0xff, 0x66, 0x44, 0xff}
-			}
-			drawText(screen, altStatus, 16, y, g.fontFace, statusClr)
-		}
+	// ── Progress bar pinned to bottom ──
+	if flight.ProgressPercent != nil {
+		pct := *flight.ProgressPercent
+		barW := float32(leftPanelWidth - 32)
+		barH := float32(4)
+		barX := float32(16)
+		barY := float32(screenHeight - 20)
+
+		// Percentage text just above bar
+		drawText(screen, fmt.Sprintf("%d%%", pct), float64(barX), float64(barY-16), g.fontFaceSm, color.RGBA{0x66, 0x66, 0x66, 0xff})
+
+		// Bar track
+		vector.DrawFilledRect(screen, barX, barY, barW, barH, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
+		// Bar fill
+		fillW := barW * float32(pct) / 100
+		vector.DrawFilledRect(screen, barX, barY, fillW, barH, color.White, false)
 	}
 }
 
@@ -356,8 +313,8 @@ func (g *Game) resolveAirlineName(flight *aeroapi.Flight) string {
 func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *aeroapi.Flight, cardX, cardY, cardW, cardH float32) {
 	code := flight.OperatorName()
 
-	maxLogoW := float64(cardW) * 0.7
-	maxLogoH := float64(cardH) * 0.6
+	maxLogoW := float64(cardW) * 0.85
+	maxLogoH := float64(cardH) * 0.70
 
 	if cached, ok := g.logoCache.Load(code); ok {
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
@@ -437,8 +394,8 @@ func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
 	}
 
 	urls := []string{
-		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_50_50_s.png", iataCode),
-		fmt.Sprintf("https://pics.avs.io/70/70/%s.png", strings.ToUpper(iataCode)),
+		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_200_200_s.png", iataCode),
+		fmt.Sprintf("https://pics.avs.io/200/200/%s.png", strings.ToUpper(iataCode)),
 	}
 
 	for _, u := range urls {
