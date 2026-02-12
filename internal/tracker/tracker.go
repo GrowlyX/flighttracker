@@ -10,8 +10,8 @@ import (
 
 const (
 	airportCode            = "KSFO"
-	positionPollInterval   = 1 * time.Second
-	flightListPollInterval = 1 * time.Second
+	positionPollInterval   = 3 * time.Second
+	flightListPollInterval = 3 * time.Second
 )
 
 // State holds a snapshot of the currently tracked flight for the UI to read.
@@ -73,12 +73,12 @@ func (t *Tracker) Run() {
 
 // runCycle performs one full arrive→depart cycle.
 func (t *Tracker) runCycle() {
-	// Phase 1: Track an arriving flight
-	t.direction = aeroapi.Arriving
-	t.trackNextFlight()
-
 	// Phase 2: Track a departing flight
 	t.direction = aeroapi.Departing
+	t.trackNextFlight()
+
+	// Phase 1: Track an arriving flight
+	t.direction = aeroapi.Arriving
 	t.trackNextFlight()
 }
 

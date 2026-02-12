@@ -17,7 +17,6 @@ import (
 	"github.com/subham/flighttracker/internal/aeroapi"
 	"github.com/subham/flighttracker/internal/tracker"
 
-	// Image decoders
 	_ "image/jpeg"
 	_ "image/png"
 )
@@ -25,10 +24,14 @@ import (
 const (
 	screenWidth  = 800
 	screenHeight = 480
-	targetTPS    = 30
+
+	// Layout: 30% left panel, 70% right map
+	leftPanelWidth = 240 // 30% of 800
+	mapX           = 240
+	mapWidth       = 560 // 70% of 800
 )
 
-// AirlineInfo maps ICAO/IATA codes to display names.
+// AirlineInfo maps ICAO codes to display names.
 var airlineNames = map[string]string{
 	"UAL": "United Airlines", "AAL": "American Airlines", "DAL": "Delta Air Lines",
 	"SWA": "Southwest Airlines", "ASA": "Alaska Airlines", "JBU": "JetBlue Airways",
@@ -52,35 +55,45 @@ var airlineNames = map[string]string{
 type Game struct {
 	tracker    *tracker.Tracker
 	mapRender  *MapRenderer
-	logoCache  sync.Map // map[string]*ebiten.Image
-	fontFace   *text.GoTextFace
+	logoCache  sync.Map
 	fontFaceSm *text.GoTextFace
+	fontFace   *text.GoTextFace
 	fontFaceLg *text.GoTextFace
 	fontFaceXl *text.GoTextFace
 }
 
-// NewGame creates a new Game instance wired to the given tracker.
+// NewGame creates a new Game instance.
 func NewGame(t *tracker.Tracker) *Game {
 	g := &Game{
 		tracker:   t,
-		mapRender: NewMapRenderer(0, 90, screenWidth, screenHeight-150),
+		mapRender: NewMapRenderer(mapX, 0, mapWidth, screenHeight),
 	}
 	g.initFonts()
 	return g
 }
 
-// initFonts sets up the font faces using the Go built-in fonts.
 func (g *Game) initFonts() {
-	source, err := text.NewGoTextFaceSource(defaultFontData())
+	regSource, err := text.NewGoTextFaceSource(regularFontData())
 	if err != nil {
-		log.Printf("[ui] error loading font: %v, using fallback", err)
+		log.Printf("[ui] error loading regular font: %v", err)
 		return
 	}
-
-	g.fontFaceSm = &text.GoTextFace{Source: source, Size: 14}
-	g.fontFace = &text.GoTextFace{Source: source, Size: 18}
-	g.fontFaceLg = &text.GoTextFace{Source: source, Size: 28}
-	g.fontFaceXl = &text.GoTextFace{Source: source, Size: 36}
+	medSource, err := text.NewGoTextFaceSource(mediumFontData())
+	if err != nil {
+		medSource = regSource
+	}
+	sbSource, err := text.NewGoTextFaceSource(semiboldFontData())
+	if err != nil {
+		sbSource = medSource
+	}
+	boldSource, err := text.NewGoTextFaceSource(boldFontData())
+	if err != nil {
+		boldSource = sbSource
+	}
+	g.fontFaceSm = &text.GoTextFace{Source: regSource, Size: 11}
+	g.fontFace = &text.GoTextFace{Source: medSource, Size: 15}
+	g.fontFaceLg = &text.GoTextFace{Source: sbSource, Size: 22}
+	g.fontFaceXl = &text.GoTextFace{Source: boldSource, Size: 30}
 }
 
 // Update is called every tick (30 TPS).
@@ -94,8 +107,7 @@ func (g *Game) Update() error {
 
 // Draw renders the entire screen.
 func (g *Game) Draw(screen *ebiten.Image) {
-	// Background
-	screen.Fill(color.RGBA{0x08, 0x0c, 0x15, 0xff})
+	screen.Fill(color.Black)
 
 	state := g.tracker.GetState()
 
@@ -104,10 +116,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		return
 	}
 
-	// Draw sections
-	g.drawHeader(screen, state)
+	// Right side: Map (70%)
 	g.drawMap(screen, state)
-	g.drawBottomBar(screen, state)
+
+	// Left side: Data panel (30%)
+	g.drawLeftPanel(screen, state)
+
+	// Divider line between panels
+	vector.DrawFilledRect(screen, leftPanelWidth-1, 0, 2, screenHeight, color.RGBA{0x25, 0x25, 0x25, 0xff}, false)
 }
 
 // Layout returns the logical screen dimensions.
@@ -121,99 +137,171 @@ func (g *Game) drawWaiting(screen *ebiten.Image, state tracker.State) {
 		return
 	}
 
-	msg := "Searching for flights at SFO..."
+	msg := "Searching for flights..."
 	if state.Error != "" {
-		msg = "Connection issue, retrying..."
+		msg = "Connecting..."
 	}
 
-	// Pulsing circle
-	vector.DrawFilledCircle(screen, screenWidth/2, screenHeight/2-30, 20, color.RGBA{0x00, 0x96, 0xff, 0x60}, false)
-	vector.DrawFilledCircle(screen, screenWidth/2, screenHeight/2-30, 10, color.RGBA{0x00, 0x96, 0xff, 0xff}, false)
+	// Pulsing dot
+	vector.DrawFilledCircle(screen, screenWidth/2, screenHeight/2-20, 8, color.RGBA{0x00, 0xbb, 0xff, 0xff}, true)
 
 	op := &text.DrawOptions{}
 	op.GeoM.Translate(screenWidth/2, screenHeight/2+20)
-	op.ColorScale.ScaleWithColor(color.RGBA{0x88, 0x99, 0xaa, 0xff})
+	op.ColorScale.ScaleWithColor(color.RGBA{0x88, 0x88, 0x88, 0xff})
 	op.PrimaryAlign = text.AlignCenter
 	text.Draw(screen, msg, g.fontFace, op)
 
-	// subtitle
 	op2 := &text.DrawOptions{}
-	op2.GeoM.Translate(screenWidth/2, screenHeight/2+50)
-	op2.ColorScale.ScaleWithColor(color.RGBA{0x55, 0x66, 0x77, 0xff})
+	op2.GeoM.Translate(screenWidth/2, screenHeight/2+45)
+	op2.ColorScale.ScaleWithColor(color.RGBA{0x44, 0x44, 0x44, 0xff})
 	op2.PrimaryAlign = text.AlignCenter
 	text.Draw(screen, "SFO Flight Tracker", g.fontFaceSm, op2)
 }
 
-// drawHeader renders the top bar with airline info.
-func (g *Game) drawHeader(screen *ebiten.Image, state tracker.State) {
+// drawLeftPanel renders the 30% left data panel.
+func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	flight := state.Flight
 
-	// Header background
-	vector.DrawFilledRect(screen, 0, 0, screenWidth, 85, color.RGBA{0x0c, 0x12, 0x20, 0xff}, false)
-	// Bottom accent line
-	vector.DrawFilledRect(screen, 0, 83, screenWidth, 2, color.RGBA{0x00, 0x96, 0xff, 0x40}, false)
+	// Panel background — very subtle dark gray
+	vector.DrawFilledRect(screen, 0, 0, leftPanelWidth, screenHeight, color.RGBA{0x0a, 0x0a, 0x0a, 0xff}, false)
 
-	// Airline logo
-	g.drawAirlineLogo(screen, flight)
-
-	if g.fontFaceLg == nil {
+	if g.fontFace == nil {
 		return
 	}
 
-	// Airline name
+	// ── Airline Logo Card ──
+	logoCardX := float32(12)
+	logoCardY := float32(12)
+	logoCardW := float32(leftPanelWidth - 24)
+	logoCardH := float32(80)
+	logoCardR := float32(10)
+
+	// White rounded rectangle background
+	drawRoundedRect(screen, logoCardX, logoCardY, logoCardW, logoCardH, logoCardR, color.RGBA{0xf5, 0xf5, 0xf5, 0xff})
+
+	// Draw logo centered in card
+	g.drawAirlineLogo(screen, flight, logoCardX, logoCardY, logoCardW, logoCardH)
+
+	y := float64(logoCardY+logoCardH) + 16
+
+	// ── Airline Name ──
 	airlineName := g.resolveAirlineName(flight)
-	xOffset := float64(85)
+	drawText(screen, airlineName, 16, y, g.fontFaceLg, color.White)
+	y += 30
 
-	op := &text.DrawOptions{}
-	op.GeoM.Translate(xOffset, 12)
-	op.ColorScale.ScaleWithColor(color.White)
-	text.Draw(screen, airlineName, g.fontFaceLg, op)
-
-	// Flight code + direction
+	// ── Flight Code ──
 	flightCode := flight.DisplayIdent()
+	drawText(screen, flightCode, 16, y, g.fontFace, color.RGBA{0x00, 0xbb, 0xff, 0xff})
+	y += 24
+
+	// ── Direction badge ──
 	dirLabel := state.Direction.String()
+	drawText(screen, dirLabel, 16, y, g.fontFaceSm, color.RGBA{0x66, 0x66, 0x66, 0xff})
+	y += 22
 
-	var cityLabel string
-	if state.Direction == 0 { // Arriving
-		cityLabel = fmt.Sprintf("From %s", flight.Origin.DisplayCity())
+	// ── Route with country flag ──
+	var routeText string
+	var flagAirport *aeroapi.AirportRef
+	if state.Direction == aeroapi.Arriving {
+		routeText = fmt.Sprintf("From %s", flight.Origin.DisplayCity())
+		flagAirport = flight.Origin
 	} else {
-		cityLabel = fmt.Sprintf("To %s", flight.Destination.DisplayCity())
+		routeText = fmt.Sprintf("To %s", flight.Destination.DisplayCity())
+		flagAirport = flight.Destination
 	}
+	drawText(screen, routeText, 16, y, g.fontFace, color.RGBA{0xcc, 0xcc, 0xcc, 0xff})
 
-	subtitle := fmt.Sprintf("%s  ·  %s  ·  %s", flightCode, dirLabel, cityLabel)
+	// Draw country flag next to route text
+	if flagAirport != nil {
+		g.drawCountryFlag(screen, flagAirport, 16+textWidth(routeText, g.fontFace)+8, y-1)
+	}
+	y += 30
 
-	op2 := &text.DrawOptions{}
-	op2.GeoM.Translate(xOffset, 48)
-	op2.ColorScale.ScaleWithColor(color.RGBA{0x88, 0x99, 0xaa, 0xff})
-	text.Draw(screen, subtitle, g.fontFaceSm, op2)
-
-	// Status badge (top right)
+	// ── Status ──
 	status := flight.Status
 	if status == "" {
 		status = "En Route"
 	}
-	if len(status) > 20 {
-		status = status[:20]
+	statusColor := color.RGBA{0x00, 0xcc, 0x66, 0xff}
+	drawText(screen, status, 16, y, g.fontFaceSm, statusColor)
+	y += 20
+
+	// ── Progress ──
+	if flight.ProgressPercent != nil {
+		pct := *flight.ProgressPercent
+		// Percentage label above the bar
+		drawText(screen, fmt.Sprintf("%d%% complete", pct), 16, y, g.fontFaceSm, color.RGBA{0x88, 0x88, 0x88, 0xff})
+		y += 16
+		// Progress bar
+		barW := float32(leftPanelWidth - 32)
+		barH := float32(3)
+		barX := float32(16)
+		barY := float32(y)
+		vector.DrawFilledRect(screen, barX, barY, barW, barH, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
+		fillW := barW * float32(pct) / 100
+		vector.DrawFilledRect(screen, barX, barY, fillW, barH, color.White, false)
+		y += 12
 	}
 
-	op3 := &text.DrawOptions{}
-	op3.GeoM.Translate(screenWidth-15, 20)
-	op3.ColorScale.ScaleWithColor(color.RGBA{0x00, 0xc8, 0x64, 0xff})
-	op3.PrimaryAlign = text.AlignEnd
-	text.Draw(screen, status, g.fontFaceSm, op3)
+	// ── Separator ──
+	y += 8
+	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
+	y += 16
 
-	// Progress
-	if flight.ProgressPercent != nil {
-		progText := fmt.Sprintf("%d%% complete", *flight.ProgressPercent)
-		op4 := &text.DrawOptions{}
-		op4.GeoM.Translate(screenWidth-15, 45)
-		op4.ColorScale.ScaleWithColor(color.RGBA{0x55, 0x66, 0x77, 0xff})
-		op4.PrimaryAlign = text.AlignEnd
-		text.Draw(screen, progText, g.fontFaceSm, op4)
+	// ── Metrics ──
+	if state.Position != nil {
+		pos := state.Position
+
+		metrics := []struct {
+			label string
+			value string
+			unit  string
+		}{
+			{"SPEED", fmt.Sprintf("%d", int(float64(pos.Groundspeed)*1.15078)), "mph"},
+			{"ALTITUDE", FormatAltitude(pos.Altitude), ""},
+			{"HEADING", FormatHeading(pos.Heading), ""},
+		}
+
+		// Altitude change status
+		altStatus := ""
+		switch pos.AltitudeChange {
+		case "C":
+			altStatus = "▲ CLIMBING"
+		case "D":
+			altStatus = "▼ DESCENDING"
+		case "-":
+			altStatus = "━ LEVEL"
+		}
+
+		for _, m := range metrics {
+			// Label
+			drawText(screen, m.label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
+			y += 16
+
+			// Value
+			valueStr := m.value
+			if m.unit != "" {
+				valueStr = m.value + " " + m.unit
+			}
+			drawText(screen, valueStr, 16, y, g.fontFaceLg, color.White)
+			y += 32
+		}
+
+		if altStatus != "" {
+			drawText(screen, "STATUS", 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
+			y += 16
+			statusClr := color.RGBA{0xcc, 0xcc, 0xcc, 0xff}
+			if pos.AltitudeChange == "C" {
+				statusClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
+			} else if pos.AltitudeChange == "D" {
+				statusClr = color.RGBA{0xff, 0x66, 0x44, 0xff}
+			}
+			drawText(screen, altStatus, 16, y, g.fontFace, statusClr)
+		}
 	}
 }
 
-// drawMap renders the center map area.
+// drawMap renders the right-side map.
 func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 	var lat, lon float64
 	var heading *int
@@ -225,164 +313,115 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 
 	g.mapRender.Draw(screen, lat, lon, heading)
 
-	// Draw SFO label on map
+	// SFO label
 	if g.fontFaceSm != nil {
 		sfoX, sfoY := g.mapRender.GetSFOScreenPos()
-		op := &text.DrawOptions{}
-		op.GeoM.Translate(float64(sfoX)+12, float64(sfoY)-8)
-		op.ColorScale.ScaleWithColor(color.RGBA{0x00, 0xc8, 0xff, 0xff})
-		text.Draw(screen, "SFO", g.fontFaceSm, op)
+		if sfoX >= mapX && sfoX <= screenWidth {
+			op := &text.DrawOptions{}
+			op.GeoM.Translate(float64(sfoX)+12, float64(sfoY)-6)
+			op.ColorScale.ScaleWithColor(color.RGBA{0x00, 0xdd, 0xff, 0xff})
+			text.Draw(screen, "SFO", g.fontFaceSm, op)
+		}
 	}
 
-	// Draw plane speed label on map
+	// Plane label
 	if state.Position != nil && g.fontFaceSm != nil {
 		px, py := g.mapRender.GetPlaneScreenPos(lat, lon)
-		speedLabel := FormatSpeed(state.Position.Groundspeed)
-		op := &text.DrawOptions{}
-		op.GeoM.Translate(float64(px)+15, float64(py)-8)
-		op.ColorScale.ScaleWithColor(color.RGBA{0xff, 0xc8, 0x00, 0xff})
-		text.Draw(screen, speedLabel, g.fontFaceSm, op)
+		if px >= mapX && px <= screenWidth {
+			speedLabel := FormatSpeed(state.Position.Groundspeed)
+			op := &text.DrawOptions{}
+			op.GeoM.Translate(float64(px)+16, float64(py)-6)
+			op.ColorScale.ScaleWithColor(color.RGBA{0xff, 0xcc, 0x00, 0xff})
+			text.Draw(screen, speedLabel, g.fontFaceSm, op)
+		}
 	}
 }
 
-// drawBottomBar renders the stats bar at the bottom.
-func (g *Game) drawBottomBar(screen *ebiten.Image, state tracker.State) {
-	barY := float32(screenHeight - 60)
-
-	// Background
-	vector.DrawFilledRect(screen, 0, barY, screenWidth, 60, color.RGBA{0x0c, 0x12, 0x20, 0xff}, false)
-	// Top accent line
-	vector.DrawFilledRect(screen, 0, barY, screenWidth, 2, color.RGBA{0x00, 0x96, 0xff, 0x40}, false)
-
-	if state.Position == nil || g.fontFace == nil {
-		return
-	}
-
-	pos := state.Position
-
-	// Stats laid out evenly across the bar
-	stats := []struct {
-		label string
-		value string
-	}{
-		{"SPEED", FormatSpeed(pos.Groundspeed)},
-		{"ALTITUDE", FormatAltitude(pos.Altitude)},
-		{"HEADING", FormatHeading(pos.Heading)},
-	}
-
-	// Add altitude change indicator
-	altChange := ""
-	switch pos.AltitudeChange {
-	case "C":
-		altChange = "CLIMBING"
-	case "D":
-		altChange = "DESCENDING"
-	case "-":
-		altChange = "LEVEL"
-	}
-	if altChange != "" {
-		stats = append(stats, struct {
-			label string
-			value string
-		}{"STATUS", altChange})
-	}
-
-	colWidth := float64(screenWidth) / float64(len(stats))
-
-	for i, s := range stats {
-		cx := colWidth*float64(i) + colWidth/2
-
-		// Label
-		op := &text.DrawOptions{}
-		op.GeoM.Translate(cx, float64(barY)+10)
-		op.ColorScale.ScaleWithColor(color.RGBA{0x55, 0x66, 0x77, 0xff})
-		op.PrimaryAlign = text.AlignCenter
-		text.Draw(screen, s.label, g.fontFaceSm, op)
-
-		// Value
-		op2 := &text.DrawOptions{}
-		op2.GeoM.Translate(cx, float64(barY)+30)
-		op2.ColorScale.ScaleWithColor(color.White)
-		op2.PrimaryAlign = text.AlignCenter
-		text.Draw(screen, s.value, g.fontFace, op2)
-	}
-}
-
-// resolveAirlineName returns the full airline name for a flight.
+// resolveAirlineName returns the full airline name.
 func (g *Game) resolveAirlineName(flight *aeroapi.Flight) string {
-	// Try operator ICAO first
 	if flight.OperatorICAO != nil {
 		if name, ok := airlineNames[*flight.OperatorICAO]; ok {
 			return name
 		}
 	}
-	// Try operator code
 	if flight.Operator != nil {
 		if name, ok := airlineNames[*flight.Operator]; ok {
 			return name
 		}
 	}
-	// Fallback to operator code display
 	return flight.OperatorName()
 }
 
-// drawAirlineLogo draws the airline logo or a fallback.
-func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *aeroapi.Flight) {
+// drawAirlineLogo draws the airline logo centered inside the white card area.
+func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *aeroapi.Flight, cardX, cardY, cardW, cardH float32) {
 	code := flight.OperatorName()
 
-	// Try to get cached logo
+	maxLogoW := float64(cardW) * 0.7
+	maxLogoH := float64(cardH) * 0.6
+
 	if cached, ok := g.logoCache.Load(code); ok {
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
 			op := &ebiten.DrawImageOptions{}
-			// Scale to 65x65 and position
 			bounds := img.Bounds()
-			scaleX := 65.0 / float64(bounds.Dx())
-			scaleY := 65.0 / float64(bounds.Dy())
+			scaleX := maxLogoW / float64(bounds.Dx())
+			scaleY := maxLogoH / float64(bounds.Dy())
 			scale := scaleX
 			if scaleY < scale {
 				scale = scaleY
 			}
+			scaledW := float64(bounds.Dx()) * scale
+			scaledH := float64(bounds.Dy()) * scale
+			// Center in card
+			offX := float64(cardX) + (float64(cardW)-scaledW)/2
+			offY := float64(cardY) + (float64(cardH)-scaledH)/2
 			op.GeoM.Scale(scale, scale)
-			op.GeoM.Translate(10, 10)
+			op.GeoM.Translate(offX, offY)
 			screen.DrawImage(img, op)
 			return
 		}
 	}
 
-	// Start async fetch
 	go g.fetchAirlineLogo(code, flight)
 
-	// Draw fallback rectangle with airline code
-	vector.DrawFilledRect(screen, 10, 10, 65, 65, color.RGBA{0x15, 0x1f, 0x30, 0xff}, false)
-	vector.StrokeRect(screen, 10, 10, 65, 65, 1, color.RGBA{0x00, 0x96, 0xff, 0x40}, false)
-
-	if g.fontFace != nil {
+	// Fallback: show airline code centered in card
+	if g.fontFaceLg != nil {
 		displayCode := code
-		if len(displayCode) > 3 {
-			displayCode = displayCode[:3]
+		if len(displayCode) > 4 {
+			displayCode = displayCode[:4]
 		}
 		op := &text.DrawOptions{}
-		op.GeoM.Translate(42, 35)
-		op.ColorScale.ScaleWithColor(color.RGBA{0x00, 0x96, 0xff, 0xff})
+		op.GeoM.Translate(float64(cardX+cardW/2), float64(cardY+cardH/2)-11)
+		op.ColorScale.ScaleWithColor(color.RGBA{0x88, 0x88, 0x88, 0xff})
 		op.PrimaryAlign = text.AlignCenter
-		text.Draw(screen, displayCode, g.fontFace, op)
+		text.Draw(screen, displayCode, g.fontFaceLg, op)
 	}
 }
 
-// fetchAirlineLogo downloads and caches an airline logo.
+// drawRoundedRect draws a filled rounded rectangle.
+func drawRoundedRect(screen *ebiten.Image, x, y, w, h, r float32, clr color.Color) {
+	// Center fill
+	vector.DrawFilledRect(screen, x+r, y, w-2*r, h, clr, true)
+	// Left fill
+	vector.DrawFilledRect(screen, x, y+r, r, h-2*r, clr, true)
+	// Right fill
+	vector.DrawFilledRect(screen, x+w-r, y+r, r, h-2*r, clr, true)
+	// Four corners
+	vector.DrawFilledCircle(screen, x+r, y+r, r, clr, true)
+	vector.DrawFilledCircle(screen, x+w-r, y+r, r, clr, true)
+	vector.DrawFilledCircle(screen, x+r, y+h-r, r, clr, true)
+	vector.DrawFilledCircle(screen, x+w-r, y+h-r, r, clr, true)
+}
+
 func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
-	// Check if already fetching/fetched
 	if _, loaded := g.logoCache.LoadOrStore(code, (*ebiten.Image)(nil)); loaded {
 		return
 	}
 
-	// Try IATA code for logo lookup
 	iataCode := ""
 	if flight.OperatorIATA != nil {
 		iataCode = strings.ToLower(*flight.OperatorIATA)
 	}
 	if iataCode == "" {
-		// Map some common ICAO to IATA
 		icaoToIATA := map[string]string{
 			"UAL": "ua", "AAL": "aa", "DAL": "dl", "SWA": "wn", "ASA": "as",
 			"JBU": "b6", "NKS": "nk", "FFT": "f9", "HAL": "ha", "SKW": "oo",
@@ -397,7 +436,6 @@ func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
 		}
 	}
 
-	// Try multiple logo sources
 	urls := []string{
 		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_50_50_s.png", iataCode),
 		fmt.Sprintf("https://pics.avs.io/70/70/%s.png", strings.ToUpper(iataCode)),
@@ -411,11 +449,9 @@ func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
 			return
 		}
 	}
-
 	log.Printf("[ui] could not fetch logo for %s", code)
 }
 
-// tryFetchImage attempts to download and decode an image from a URL.
 func tryFetchImage(imgURL string) image.Image {
 	resp, err := http.Get(imgURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -426,7 +462,6 @@ func tryFetchImage(imgURL string) image.Image {
 	}
 	defer resp.Body.Close()
 
-	// Limit read to 512KB
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil || len(data) < 100 {
 		return nil
@@ -437,4 +472,229 @@ func tryFetchImage(imgURL string) image.Image {
 		return nil
 	}
 	return img
+}
+
+// drawText is a helper to draw text at a given position.
+func drawText(screen *ebiten.Image, s string, x, y float64, face *text.GoTextFace, clr color.Color) {
+	if face == nil {
+		return
+	}
+	op := &text.DrawOptions{}
+	op.GeoM.Translate(x, y)
+	op.ColorScale.ScaleWithColor(clr)
+	text.Draw(screen, s, face, op)
+}
+
+// textWidth measures the pixel width of a string with the given font face.
+func textWidth(s string, face *text.GoTextFace) float64 {
+	if face == nil {
+		return 0
+	}
+	w, _ := text.Measure(s, face, 0)
+	return w
+}
+
+// drawCountryFlag draws a small country flag image next to the route text.
+func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *aeroapi.AirportRef, x, y float64) {
+	countryCode := icaoToCountryCode(airport)
+	if countryCode == "" {
+		return
+	}
+
+	cacheKey := "flag_" + countryCode
+	if cached, ok := g.logoCache.Load(cacheKey); ok {
+		if img, ok := cached.(*ebiten.Image); ok && img != nil {
+			op := &ebiten.DrawImageOptions{}
+			bounds := img.Bounds()
+			// Scale to 22x16
+			scaleX := 22.0 / float64(bounds.Dx())
+			scaleY := 16.0 / float64(bounds.Dy())
+			op.GeoM.Scale(scaleX, scaleY)
+			op.GeoM.Translate(x, y+1)
+			screen.DrawImage(img, op)
+		}
+		return
+	}
+
+	// Fetch async
+	go func() {
+		if _, loaded := g.logoCache.LoadOrStore(cacheKey, (*ebiten.Image)(nil)); loaded {
+			return
+		}
+		url := fmt.Sprintf("https://flagcdn.com/w80/%s.png", countryCode)
+		img := tryFetchImage(url)
+		if img != nil {
+			ebiImg := ebiten.NewImageFromImage(img)
+			g.logoCache.Store(cacheKey, ebiImg)
+		}
+	}()
+}
+
+// icaoToCountryCode extracts the ISO 3166-1 alpha-2 country code from an airport's ICAO code.
+func icaoToCountryCode(airport *aeroapi.AirportRef) string {
+	code := ""
+	if airport.CodeICAO != nil && *airport.CodeICAO != "" {
+		code = *airport.CodeICAO
+	} else if airport.Code != nil && *airport.Code != "" {
+		code = *airport.Code
+	}
+	if len(code) < 2 {
+		return ""
+	}
+
+	prefix2 := code[:2]
+	prefix1 := code[:1]
+
+	// 2-letter prefix matches (more specific)
+	if cc, ok := icaoPrefixToCountry[prefix2]; ok {
+		return cc
+	}
+	// 1-letter prefix matches
+	if cc, ok := icaoPrefixToCountry[prefix1]; ok {
+		return cc
+	}
+	return ""
+}
+
+// icaoPrefixToCountry maps ICAO airport code prefixes to ISO 3166-1 alpha-2 country codes.
+var icaoPrefixToCountry = map[string]string{
+	// North America
+	"K":  "us", // USA (continental)
+	"PH": "us", // Hawaii
+	"PA": "us", // Alaska
+	"PG": "us", // Guam
+	"C":  "ca", // Canada
+	"MM": "mx", // Mexico
+
+	// Central America & Caribbean
+	"MG": "gt", // Guatemala
+	"MH": "hn", // Honduras
+	"MN": "ni", // Nicaragua
+	"MR": "cr", // Costa Rica
+	"MP": "pa", // Panama
+	"MK": "jm", // Jamaica
+	"MT": "ht", // Haiti
+	"MD": "do", // Dominican Republic
+	"MU": "cu", // Cuba
+	"TB": "bb", // Barbados
+	"TT": "tt", // Trinidad
+	"TJ": "pr", // Puerto Rico
+	"TI": "vi", // U.S. Virgin Islands
+
+	// South America
+	"SB": "br", // Brazil
+	"SA": "ar", // Argentina
+	"SC": "cl", // Chile
+	"SK": "co", // Colombia
+	"SP": "pe", // Peru
+	"SV": "ve", // Venezuela
+	"SE": "ec", // Ecuador
+	"SU": "uy", // Uruguay
+	"SG": "py", // Paraguay
+	"SL": "bo", // Bolivia
+
+	// Europe
+	"EG": "gb", // United Kingdom
+	"EI": "ie", // Ireland
+	"LF": "fr", // France
+	"ED": "de", // Germany
+	"LI": "it", // Italy
+	"LE": "es", // Spain
+	"LP": "pt", // Portugal
+	"EH": "nl", // Netherlands
+	"EB": "be", // Belgium
+	"LS": "ch", // Switzerland
+	"LO": "at", // Austria
+	"EK": "dk", // Denmark
+	"EN": "no", // Norway
+	"ES": "se", // Sweden
+	"EF": "fi", // Finland
+	"EE": "ee", // Estonia
+	"EV": "lv", // Latvia
+	"EY": "lt", // Lithuania
+	"EP": "pl", // Poland
+	"LK": "cz", // Czech Republic
+	"LZ": "sk", // Slovakia
+	"LH": "hu", // Hungary
+	"LR": "ro", // Romania
+	"LB": "bg", // Bulgaria
+	"LG": "gr", // Greece
+	"LT": "tr", // Turkey
+	"LJ": "si", // Slovenia
+	"LD": "hr", // Croatia
+	"LY": "rs", // Serbia
+	"BI": "is", // Iceland
+	"LU": "md", // Moldova
+	"UK": "ua", // Ukraine
+
+	// Middle East
+	"OE": "sa", // Saudi Arabia
+	"OM": "ae", // UAE
+	"OB": "bh", // Bahrain
+	"OK": "kw", // Kuwait
+	"OO": "om", // Oman
+	"OT": "qa", // Qatar
+	"OI": "ir", // Iran
+	"OJ": "jo", // Jordan
+	"OL": "lb", // Lebanon
+	"OS": "sy", // Syria
+	"LL": "il", // Israel
+
+	// Asia
+	"ZS": "cn", // China (south)
+	"ZB": "cn", // China (north)
+	"ZG": "cn", // China (central)
+	"ZU": "cn", // China (west)
+	"ZW": "cn", // China
+	"ZH": "cn", // China
+	"RJ": "jp", // Japan
+	"RK": "kr", // South Korea
+	"VT": "th", // Thailand
+	"WS": "sg", // Singapore
+	"WM": "my", // Malaysia
+	"WI": "id", // Indonesia
+	"WA": "id", // Indonesia
+	"RP": "ph", // Philippines
+	"VV": "vn", // Vietnam
+	"VH": "hk", // Hong Kong
+	"VM": "mo", // Macau
+	"RC": "tw", // Taiwan
+	"VI": "in", // India (north)
+	"VO": "in", // India (south)
+	"VA": "in", // India (west)
+	"VE": "in", // India (east)
+	"VQ": "bt", // Bhutan
+	"VN": "np", // Nepal
+	"VL": "la", // Laos
+	"VY": "mm", // Myanmar
+	"VC": "lk", // Sri Lanka
+	"OP": "pk", // Pakistan
+
+	// Oceania
+	"Y":  "au", // Australia
+	"NZ": "nz", // New Zealand
+	"NF": "fj", // Fiji
+	"PF": "us", // Midway
+	"PT": "fm", // Micronesia
+
+	// Africa
+	"DA": "dz", // Algeria
+	"DT": "tn", // Tunisia
+	"GM": "ma", // Morocco
+	"HA": "et", // Ethiopia
+	"HK": "ke", // Kenya
+	"HT": "tz", // Tanzania
+	"HR": "rw", // Rwanda
+	"HU": "ug", // Uganda
+	"FA": "za", // South Africa
+	"FV": "zw", // Zimbabwe
+	"DN": "ng", // Nigeria
+	"DG": "gh", // Ghana
+	"FW": "mw", // Malawi
+	"FL": "zm", // Zambia
+	"HE": "eg", // Egypt
+	"HC": "so", // Somalia
+
+	// Russia
+	"U": "ru", // Russia
 }
