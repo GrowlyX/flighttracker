@@ -1,8 +1,11 @@
 package tracker
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -96,6 +99,11 @@ func (t *Tracker) trackNextFlight() {
 
 		log.Printf("[tracker] tracking %s flight %s (%s)", t.direction, flight.DisplayIdent(), flight.FlightID)
 		t.currentFlightID = flight.FlightID
+
+		// Backfill aircraft type if missing (e.g. OpenSky doesn't provide it)
+		if flight.AircraftType == "" && flight.FlightID != "" {
+			go t.backfillAircraftType(flight)
+		}
 
 		// Set initial state with flight info
 		t.setState(State{
@@ -246,4 +254,61 @@ func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
 		})
 	}
 	return false
+}
+
+// hexdbResponse represents the hexdb.io aircraft lookup response.
+type hexdbResponse struct {
+	ICAOTypeCode     string `json:"ICAOTypeCode"` // e.g. "A359", "B738"
+	Type             string `json:"Type"`         // e.g. "Airbus A350-900"
+	RegisteredOwners string `json:"RegisteredOwners"`
+}
+
+// backfillAircraftType looks up the aircraft type from the ICAO24 hex code
+// using the free hexdb.io API and updates the flight + state.
+func (t *Tracker) backfillAircraftType(flight *provider.Flight) {
+	icao24 := flight.FlightID
+	if len(icao24) != 6 {
+		return // not a valid ICAO24 hex
+	}
+
+	apiURL := fmt.Sprintf("https://hexdb.io/api/v1/aircraft/%s", icao24)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		log.Printf("[tracker] hexdb lookup error for %s: %v", icao24, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[tracker] hexdb HTTP %d for %s", resp.StatusCode, icao24)
+		return
+	}
+
+	var result hexdbResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[tracker] hexdb decode error for %s: %v", icao24, err)
+		return
+	}
+
+	if result.ICAOTypeCode == "" {
+		return
+	}
+
+	log.Printf("[tracker] backfilled aircraft type for %s: %s", flight.DisplayIdent(), result.ICAOTypeCode)
+	flight.AircraftType = result.ICAOTypeCode
+
+	// Re-publish state so UI picks up the new type
+	t.mu.RLock()
+	currentState := t.state
+	t.mu.RUnlock()
+
+	if currentState.Flight != nil && currentState.Flight.FlightID == flight.FlightID {
+		t.setState(State{
+			Flight:    flight,
+			Position:  currentState.Position,
+			Direction: currentState.Direction,
+		})
+	}
 }
