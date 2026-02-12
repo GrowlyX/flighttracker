@@ -51,6 +51,8 @@ func main() {
 
 	// Create tracker
 	t := tracker.New(prov)
+	// Only track flights from known passenger airlines
+	t.AirlineFilter = ui.IsKnownAirline
 
 	// Start tracker in background
 	go t.Run()

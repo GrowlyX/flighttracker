@@ -61,3 +61,19 @@ func LookupAirlineByName(name string) (AirlineEntry, bool) {
 	a, ok := airlineByNameLower[strings.ToLower(name)]
 	return a, ok
 }
+
+// IsKnownAirline returns true if the given IATA code, operator name, or both
+// can be resolved to a known airline in the dataset.
+func IsKnownAirline(iata, name string) bool {
+	if iata != "" {
+		if _, ok := airlineByIATA[strings.ToLower(iata)]; ok {
+			return true
+		}
+	}
+	if name != "" {
+		if _, ok := airlineByNameLower[strings.ToLower(name)]; ok {
+			return true
+		}
+	}
+	return false
+}

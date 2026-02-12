@@ -124,14 +124,14 @@ func (m *MapRenderer) Update(planeLat, planeLon float64) {
 		m.targetZoom = newZoom
 	}
 
-	// Smooth center panning
-	centerBlend := 0.06
+	// Smooth center panning (responsive enough to track fast departures)
+	centerBlend := 0.12
 	m.centerLat += (m.targetCenterLat - m.centerLat) * centerBlend
 	m.centerLon += (m.targetCenterLon - m.centerLon) * centerBlend
 
 	// Rate-limited smooth zoom transition
 	diff := m.targetZoom - m.zoom
-	maxStep := 0.05
+	maxStep := 0.12
 	if diff > maxStep {
 		diff = maxStep
 	} else if diff < -maxStep {

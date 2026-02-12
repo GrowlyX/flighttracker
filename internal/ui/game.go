@@ -49,7 +49,8 @@ type Game struct {
 	anchorTime           time.Time // when anchor was received
 	interpLat, interpLon float64   // current rendered position (projected)
 	drSpeed              float64   // groundspeed in knots for dead reckoning
-	drHeading            float64   // heading in degrees for dead reckoning
+	drHeading            float64   // target heading from API (degrees)
+	drHeadingSmooth      float64   // smoothly interpolated heading for projection
 	hasAnchor            bool
 	lastFlightID         string // detect flight changes
 
@@ -140,6 +141,7 @@ func (g *Game) Update() error {
 			g.animAltitude = float64(state.Position.Altitude) * 100
 			if state.Position.Heading != nil {
 				g.animHeading = float64(*state.Position.Heading)
+				g.drHeadingSmooth = float64(*state.Position.Heading)
 			}
 		} else if posChanged {
 			// New position update — update anchor
@@ -178,6 +180,20 @@ func (g *Game) Update() error {
 			g.animHeading -= 360
 		}
 
+		// Smoothly blend dead-reckoning heading toward target (shortest angular path)
+		drHdgDiff := g.drHeading - g.drHeadingSmooth
+		if drHdgDiff > 180 {
+			drHdgDiff -= 360
+		} else if drHdgDiff < -180 {
+			drHdgDiff += 360
+		}
+		g.drHeadingSmooth += drHdgDiff * 0.10 // smooth turn rate
+		if g.drHeadingSmooth < 0 {
+			g.drHeadingSmooth += 360
+		} else if g.drHeadingSmooth >= 360 {
+			g.drHeadingSmooth -= 360
+		}
+
 		// Dead-reckon: continuously project position forward from anchor
 		g.deadReckon()
 
@@ -213,9 +229,9 @@ func (g *Game) deadReckon() {
 	}
 
 	// Project from anchor: pos = anchor + velocity * dt
-	speedKmS := g.drSpeed * 1.852 / 3600.0 // knots → km/s
-	headingRad := g.drHeading * math.Pi / 180.0
-	dist := speedKmS * dt // total distance from anchor
+	speedKmS := g.drSpeed * 1.852 / 3600.0            // knots → km/s
+	headingRad := g.drHeadingSmooth * math.Pi / 180.0 // use smoothed heading
+	dist := speedKmS * dt                             // total distance from anchor
 
 	earthRadius := 6371.0
 	dLat := (dist * math.Cos(headingRad)) / earthRadius * (180.0 / math.Pi)
@@ -339,11 +355,18 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	}
 
 	// ── Aircraft type ──
-	if flight.OperatorIATA != "" && flight.AircraftType != "" {
-		if acType := LookupAircraftType(flight.OperatorIATA, flight.AircraftType); acType != "" {
-			drawText(screen, acType, 16, y, g.fontFace, color.RGBA{0x99, 0x99, 0x99, 0xff})
-			y += 24
+	if flight.AircraftType != "" {
+		acType := ""
+		// Try fleet lookup by IATA code first
+		if flight.OperatorIATA != "" {
+			acType = LookupAircraftType(flight.OperatorIATA, flight.AircraftType)
 		}
+		// Fallback: show raw ICAO type code (e.g. "B738", "A359")
+		if acType == "" {
+			acType = flight.AircraftType
+		}
+		drawText(screen, acType, 16, y, g.fontFace, color.RGBA{0x99, 0x99, 0x99, 0xff})
+		y += 24
 	}
 
 	// ── Separator ──
@@ -412,7 +435,9 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 		// Use interpolated position for smooth rendering
 		lat = g.interpLat
 		lon = g.interpLon
-		heading = state.Position.Heading
+		// Use smoothed heading for smooth icon rotation
+		smoothHdg := int(g.drHeadingSmooth)
+		heading = &smoothHdg
 	}
 
 	g.mapRender.Draw(screen, lat, lon, heading, g.trailPoints)

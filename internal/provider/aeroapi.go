@@ -98,6 +98,25 @@ func (a *AeroAPIProvider) GetFlightsNear(airportICAO string, direction FlightDir
 	return result, nil
 }
 
+// GetFlightInfo fetches full flight info by IATA ident (e.g. "NH105") to get
+// route data (origin/destination). Returns nil if not found.
+func (a *AeroAPIProvider) GetFlightInfo(identIATA string) *Flight {
+	var raw struct {
+		Flights []aeroFlight `json:"flights"`
+	}
+	if err := a.doRequest("/flights/"+url.PathEscape(identIATA), nil, &raw); err != nil {
+		return nil
+	}
+	// Find the first active (en route) flight
+	for _, f := range raw.Flights {
+		if f.ActualOff != nil && f.ActualOn == nil && !f.Cancelled {
+			flight := f.toFlight()
+			return &flight
+		}
+	}
+	return nil
+}
+
 // GetFlightPosition returns the latest position for a flight.
 func (a *AeroAPIProvider) GetFlightPosition(flight *Flight) (*FlightPosition, error) {
 	var raw struct {

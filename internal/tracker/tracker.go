@@ -38,6 +38,10 @@ type Tracker struct {
 	// Current tracking context
 	currentFlightID string
 	direction       provider.FlightDirection
+
+	// AirlineFilter is an optional callback that returns true if the airline
+	// code/name is known. Flights failing this check are skipped.
+	AirlineFilter func(iata, name string) bool
 }
 
 // New creates a new Tracker with the given flight provider.
@@ -153,6 +157,14 @@ func (t *Tracker) findEnRouteFlight() *provider.Flight {
 		if !f.IsAirborne || f.Ident == "" {
 			continue
 		}
+
+		// Skip flights from unknown/unresolvable airlines (cargo, private, etc.)
+		if t.AirlineFilter != nil {
+			if !t.AirlineFilter(f.OperatorIATA, f.Operator) {
+				continue
+			}
+		}
+
 		// Skip flights without a position (we can't compute distance)
 		// For AeroAPI flights, we don't have lat/lon at discovery time,
 		// so we allow them through with dist=0.
