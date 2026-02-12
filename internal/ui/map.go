@@ -102,13 +102,16 @@ func (m *MapRenderer) Update(planeLat, planeLon float64) {
 		lonDiff := math.Abs(sfoLon - planeLon)
 		maxDiff := math.Max(latDiff, lonDiff)
 
-		if maxDiff < 0.02 {
-			maxDiff = 0.02 // floor to prevent extreme zoom-in
+		// Add 40% padding so both SFO and plane are well within frame
+		maxDiff *= 1.4
+
+		if maxDiff < 0.03 {
+			maxDiff = 0.03 // floor to prevent extreme zoom-in
 		}
 
 		// zoom ≈ 8.5 - 3.0 * log2(maxDiff)
 		newZoom := 8.5 - 3.0*math.Log2(maxDiff)
-		newZoom = math.Max(3, math.Min(12, newZoom)) // cap at 12 (was 15)
+		newZoom = math.Max(3, math.Min(11, newZoom)) // cap at 11
 
 		m.targetZoom = newZoom
 	}

@@ -28,10 +28,10 @@ const (
 	screenWidth  = 800
 	screenHeight = 480
 
-	// Layout: 30% left panel, 70% right map
-	leftPanelWidth = 240 // 30% of 800
-	mapX           = 240
-	mapWidth       = 560 // 70% of 800
+	// Layout: 35% left panel, 65% right map
+	leftPanelWidth = 280 // 35% of 800
+	mapX           = 280
+	mapWidth       = 520 // 65% of 800
 )
 
 // Game implements ebiten.Game for the flight tracker display.
@@ -128,7 +128,8 @@ func (g *Game) Update() error {
 			g.anchorTime = time.Now()
 			g.hasAnchor = true
 			g.lastFlightID = state.Flight.FlightID
-			g.trailPoints = nil // reset trail for new flight
+			// Start trail at SFO airport so the line always begins there
+			g.trailPoints = [][2]float64{{sfoLat, sfoLon}}
 			g.trailTick = 0
 
 			// Snap animated metrics instantly on new flight
@@ -294,7 +295,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	logoCardX := float32(12)
 	logoCardY := float32(12)
 	logoCardW := float32(leftPanelWidth - 24)
-	logoCardH := float32(140)
+	logoCardH := float32(120)
 	logoCardR := float32(10)
 
 	// White rounded rectangle background
@@ -303,17 +304,17 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	// Draw logo centered in card
 	g.drawAirlineLogo(screen, flight, logoCardX, logoCardY, logoCardW, logoCardH)
 
-	y := float64(logoCardY+logoCardH) + 16
+	y := float64(logoCardY+logoCardH) + 12
 
 	// ── Airline Name ──
 	airlineName := g.resolveAirlineName(flight)
 	drawText(screen, airlineName, 16, y, g.fontFaceXl, color.White)
-	y += 36
+	y += 28
 
 	// ── Flight Code ──
 	flightCode := flight.DisplayIdent()
 	drawText(screen, flightCode, 16, y, g.fontFaceLg, color.RGBA{0x00, 0xbb, 0xff, 0xff})
-	y += 32
+	y += 24
 
 	// ── Route with country flag ──
 	var routeText string
@@ -344,7 +345,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 
 	// ── Separator ──
 	vector.DrawFilledRect(screen, 16, float32(y), leftPanelWidth-32, 1, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
-	y += 20
+	y += 12
 
 	// ── Metrics (animated scroll) ──
 	if state.Position != nil {
@@ -365,7 +366,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 		for i, label := range labels {
 			// Label
 			drawText(screen, label, 16, y, g.fontFaceSm, color.RGBA{0x55, 0x55, 0x55, 0xff})
-			y += 18
+			y += 14
 
 			if loading {
 				// Skeleton placeholder bar
@@ -374,7 +375,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 			} else {
 				drawText(screen, values[i], 16, y, g.fontFaceXl, color.White)
 			}
-			y += 38
+			y += 32
 		}
 
 		// ── Altitude Status ──
@@ -457,8 +458,8 @@ func (g *Game) resolveAirlineName(flight *provider.Flight) string {
 func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, cardX, cardY, cardW, cardH float32) {
 	code := flight.OperatorName()
 
-	maxLogoW := float64(cardW) * 0.90
-	maxLogoH := float64(cardH) * 0.80
+	maxLogoW := float64(cardW) * 0.95
+	maxLogoH := float64(cardH) * 0.85
 
 	if cached, ok := g.logoCache.Load(code); ok {
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
@@ -475,7 +476,7 @@ func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, ca
 			// Center in card
 			offX := float64(cardX) + (float64(cardW)-scaledW)/2
 			offY := float64(cardY) + (float64(cardH)-scaledH)/2
-			op.GeoM.Scale(scale*1.25, scale*1.25)
+			op.GeoM.Scale(scale, scale)
 			op.GeoM.Translate(offX, offY)
 			screen.DrawImage(img, op)
 			return

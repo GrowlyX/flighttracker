@@ -192,6 +192,8 @@ func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
 
 	consecutiveErrors := 0
 	const maxErrors = 30
+	// Disqualify flights that move beyond this distance from SFO
+	const maxPollDistanceNM = 100.0
 
 	for range ticker.C {
 		pos, err := t.prov.GetFlightPosition(flight)
@@ -205,6 +207,16 @@ func (t *Tracker) pollUntilComplete(flight *provider.Flight) bool {
 			continue
 		}
 		consecutiveErrors = 0
+
+		// Disqualify if flight has moved too far from SFO
+		if pos.Latitude != 0 && pos.Longitude != 0 {
+			dist := haversineNM(sfoLat, sfoLon, pos.Latitude, pos.Longitude)
+			if dist > maxPollDistanceNM {
+				log.Printf("[tracker] flight %s is %.0fnm from SFO (max %0.fnm), disqualifying",
+					flight.DisplayIdent(), dist, maxPollDistanceNM)
+				return true // treat as completed so we move on
+			}
+		}
 
 		// For departures, track until they're well airborne (altitude > 100 = 10,000ft)
 		if t.direction == provider.Departing && pos.Altitude > 100 {
