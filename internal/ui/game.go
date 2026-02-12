@@ -14,7 +14,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-	"github.com/subham/flighttracker/internal/aeroapi"
+	"github.com/subham/flighttracker/internal/provider"
 	"github.com/subham/flighttracker/internal/tracker"
 
 	_ "image/jpeg"
@@ -173,7 +173,7 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 	logoCardX := float32(12)
 	logoCardY := float32(12)
 	logoCardW := float32(leftPanelWidth - 24)
-	logoCardH := float32(80)
+	logoCardH := float32(100)
 	logoCardR := float32(10)
 
 	// White rounded rectangle background
@@ -196,8 +196,8 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 
 	// ── Route with country flag ──
 	var routeText string
-	var flagAirport *aeroapi.AirportRef
-	if state.Direction == aeroapi.Arriving {
+	var flagAirport *provider.AirportRef
+	if state.Direction == provider.Arriving {
 		routeText = fmt.Sprintf("From %s", flight.Origin.DisplayCity())
 		flagAirport = flight.Origin
 	} else {
@@ -237,24 +237,25 @@ func (g *Game) drawLeftPanel(screen *ebiten.Image, state tracker.State) {
 			drawText(screen, m.value, 16, y, g.fontFaceXl, color.White)
 			y += 38
 		}
-	}
 
-	// ── Progress bar pinned to bottom ──
-	if flight.ProgressPercent != nil {
-		pct := *flight.ProgressPercent
-		barW := float32(leftPanelWidth - 32)
-		barH := float32(4)
-		barX := float32(16)
-		barY := float32(screenHeight - 20)
-
-		// Percentage text just above bar
-		drawText(screen, fmt.Sprintf("%d%%", pct), float64(barX), float64(barY-16), g.fontFaceSm, color.RGBA{0x66, 0x66, 0x66, 0xff})
-
-		// Bar track
-		vector.DrawFilledRect(screen, barX, barY, barW, barH, color.RGBA{0x22, 0x22, 0x22, 0xff}, false)
-		// Bar fill
-		fillW := barW * float32(pct) / 100
-		vector.DrawFilledRect(screen, barX, barY, fillW, barH, color.White, false)
+		// ── Altitude Status ──
+		y += 4
+		altStatus := ""
+		var altClr color.RGBA
+		switch pos.AltitudeChange {
+		case "C":
+			altStatus = "▲ CLIMBING"
+			altClr = color.RGBA{0x00, 0xcc, 0x66, 0xff}
+		case "D":
+			altStatus = "▼ DESCENDING"
+			altClr = color.RGBA{0xff, 0x66, 0x44, 0xff}
+		case "-":
+			altStatus = "━ LEVEL"
+			altClr = color.RGBA{0xaa, 0xaa, 0xaa, 0xff}
+		}
+		if altStatus != "" {
+			drawText(screen, altStatus, 16, y, g.fontFaceLg, altClr)
+		}
 	}
 }
 
@@ -295,14 +296,14 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 }
 
 // resolveAirlineName returns the full airline name.
-func (g *Game) resolveAirlineName(flight *aeroapi.Flight) string {
-	if flight.OperatorICAO != nil {
-		if name, ok := airlineNames[*flight.OperatorICAO]; ok {
+func (g *Game) resolveAirlineName(flight *provider.Flight) string {
+	if flight.OperatorICAO != "" {
+		if name, ok := airlineNames[flight.OperatorICAO]; ok {
 			return name
 		}
 	}
-	if flight.Operator != nil {
-		if name, ok := airlineNames[*flight.Operator]; ok {
+	if flight.Operator != "" {
+		if name, ok := airlineNames[flight.Operator]; ok {
 			return name
 		}
 	}
@@ -310,11 +311,11 @@ func (g *Game) resolveAirlineName(flight *aeroapi.Flight) string {
 }
 
 // drawAirlineLogo draws the airline logo centered inside the white card area.
-func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *aeroapi.Flight, cardX, cardY, cardW, cardH float32) {
+func (g *Game) drawAirlineLogo(screen *ebiten.Image, flight *provider.Flight, cardX, cardY, cardW, cardH float32) {
 	code := flight.OperatorName()
 
-	maxLogoW := float64(cardW) * 0.85
-	maxLogoH := float64(cardH) * 0.70
+	maxLogoW := float64(cardW) * 0.90
+	maxLogoH := float64(cardH) * 0.80
 
 	if cached, ok := g.logoCache.Load(code); ok {
 		if img, ok := cached.(*ebiten.Image); ok && img != nil {
@@ -369,14 +370,14 @@ func drawRoundedRect(screen *ebiten.Image, x, y, w, h, r float32, clr color.Colo
 	vector.DrawFilledCircle(screen, x+w-r, y+h-r, r, clr, true)
 }
 
-func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
+func (g *Game) fetchAirlineLogo(code string, flight *provider.Flight) {
 	if _, loaded := g.logoCache.LoadOrStore(code, (*ebiten.Image)(nil)); loaded {
 		return
 	}
 
 	iataCode := ""
-	if flight.OperatorIATA != nil {
-		iataCode = strings.ToLower(*flight.OperatorIATA)
+	if flight.OperatorIATA != "" {
+		iataCode = strings.ToLower(flight.OperatorIATA)
 	}
 	if iataCode == "" {
 		icaoToIATA := map[string]string{
@@ -394,8 +395,8 @@ func (g *Game) fetchAirlineLogo(code string, flight *aeroapi.Flight) {
 	}
 
 	urls := []string{
-		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_200_200_s.png", iataCode),
-		fmt.Sprintf("https://pics.avs.io/200/200/%s.png", strings.ToUpper(iataCode)),
+		fmt.Sprintf("https://content.airhex.com/content/logos/airlines_%s_350_350_s.png", iataCode),
+		fmt.Sprintf("https://pics.avs.io/350/350/%s.png", strings.ToUpper(iataCode)),
 	}
 
 	for _, u := range urls {
@@ -452,7 +453,7 @@ func textWidth(s string, face *text.GoTextFace) float64 {
 }
 
 // drawCountryFlag draws a small country flag image next to the route text.
-func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *aeroapi.AirportRef, x, y float64) {
+func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *provider.AirportRef, x, y float64) {
 	countryCode := icaoToCountryCode(airport)
 	if countryCode == "" {
 		return
@@ -488,12 +489,12 @@ func (g *Game) drawCountryFlag(screen *ebiten.Image, airport *aeroapi.AirportRef
 }
 
 // icaoToCountryCode extracts the ISO 3166-1 alpha-2 country code from an airport's ICAO code.
-func icaoToCountryCode(airport *aeroapi.AirportRef) string {
+func icaoToCountryCode(airport *provider.AirportRef) string {
 	code := ""
-	if airport.CodeICAO != nil && *airport.CodeICAO != "" {
-		code = *airport.CodeICAO
-	} else if airport.Code != nil && *airport.Code != "" {
-		code = *airport.Code
+	if airport.CodeICAO != "" {
+		code = airport.CodeICAO
+	} else if airport.Code != "" {
+		code = airport.Code
 	}
 	if len(code) < 2 {
 		return ""
