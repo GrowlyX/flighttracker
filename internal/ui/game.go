@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -69,6 +70,17 @@ func NewGame(t *tracker.Tracker) *Game {
 		mapRender: NewMapRenderer(mapX, 0, mapWidth, screenHeight),
 	}
 	g.initFonts()
+
+	// Load airplane icon
+	pngData, err := os.ReadFile("internal/ui/assets/apple_sf_airplane.png")
+	if err != nil {
+		log.Printf("[ui] warning: could not load airplane icon: %v", err)
+	} else {
+		if err := g.mapRender.LoadPlaneIcon(pngData); err != nil {
+			log.Printf("[ui] warning: could not decode airplane icon: %v", err)
+		}
+	}
+
 	return g
 }
 
@@ -282,15 +294,14 @@ func (g *Game) drawMap(screen *ebiten.Image, state tracker.State) {
 		}
 	}
 
-	// Plane label
-	if state.Position != nil && g.fontFaceSm != nil {
+	// Plane label — just show ident
+	if state.Position != nil && g.fontFaceSm != nil && state.Flight != nil {
 		px, py := g.mapRender.GetPlaneScreenPos(lat, lon)
 		if px >= mapX && px <= screenWidth {
-			speedLabel := FormatSpeed(state.Position.Groundspeed)
 			op := &text.DrawOptions{}
-			op.GeoM.Translate(float64(px)+16, float64(py)-6)
-			op.ColorScale.ScaleWithColor(color.RGBA{0xff, 0xcc, 0x00, 0xff})
-			text.Draw(screen, speedLabel, g.fontFaceSm, op)
+			op.GeoM.Translate(float64(px)+22, float64(py)-6)
+			op.ColorScale.ScaleWithColor(color.White)
+			text.Draw(screen, state.Flight.DisplayIdent(), g.fontFaceSm, op)
 		}
 	}
 }
