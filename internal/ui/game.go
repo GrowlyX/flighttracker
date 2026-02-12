@@ -120,17 +120,20 @@ func (g *Game) Update() error {
 		posChanged := newLat != g.anchorLat || newLon != g.anchorLon
 
 		if flightChanged {
-			// New flight — snap immediately
+			// New flight — start interpolation from SFO, blend toward plane
 			g.anchorLat = newLat
 			g.anchorLon = newLon
-			g.interpLat = newLat
-			g.interpLon = newLon
+			g.interpLat = sfoLat // start at SFO for smooth pan-out
+			g.interpLon = sfoLon
 			g.anchorTime = time.Now()
 			g.hasAnchor = true
 			g.lastFlightID = state.Flight.FlightID
 			// Start trail at SFO airport so the line always begins there
 			g.trailPoints = [][2]float64{{sfoLat, sfoLon}}
 			g.trailTick = 0
+
+			// Reset map center to SFO so it pans out smoothly
+			g.mapRender.ResetCenter()
 
 			// Snap animated metrics instantly on new flight
 			g.animSpeed = float64(state.Position.Groundspeed) * 1.15078

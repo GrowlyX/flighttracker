@@ -86,6 +86,14 @@ func tileXYToLatLon(x, y float64, zoom int) (float64, float64) {
 	return lat, lon
 }
 
+// ResetCenter snaps the map center back to SFO for smooth pan-out on flight change.
+func (m *MapRenderer) ResetCenter() {
+	m.centerLat = sfoLat
+	m.centerLon = sfoLon
+	m.targetCenterLat = sfoLat
+	m.targetCenterLon = sfoLon
+}
+
 // Update recalculates the map viewport to fit both SFO and the plane.
 func (m *MapRenderer) Update(planeLat, planeLon float64) {
 	if planeLat == 0 && planeLon == 0 {
